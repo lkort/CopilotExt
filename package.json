@@ -54,6 +54,16 @@
           "default": "",
           "format": "password",
           "description": "GitHub PAT. Used with token or Bearer auth."
+        },
+        "sg.git.autoCommit": {
+          "type": "boolean",
+          "default": true,
+          "description": "If false, applies edits only — no branch, commit, push, or PR."
+        },
+        "sg.git.autoPush": {
+          "type": "boolean",
+          "default": true,
+          "description": "If false, commits locally but does not push or open a PR (ignored when autoCommit is false)."
         }
       }
     },

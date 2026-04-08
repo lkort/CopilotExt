@@ -155,10 +155,16 @@ async function collectResponseText(resp: any): Promise<string> {
   return String(resp);
 }
 
-async function implementFromJira(jiraKey: string, progress?: vscode.Progress<{ message?: string }>): Promise<{ prUrl?: string }> {
+async function implementFromJira(
+  jiraKey: string,
+  progress?: vscode.Progress<{ message?: string }>
+): Promise<{ prUrl?: string; userMessage: string }> {
   requireWorkspace();
 
   const cfg = getCfg();
+  const autoCommit = cfg.get<boolean>('git.autoCommit') !== false;
+  const autoPush = cfg.get<boolean>('git.autoPush') !== false;
+
   const jira = new JiraClient(cfg);
   const gh = new GitHubClient(cfg);
   const git = new GitService();
@@ -176,6 +182,13 @@ async function implementFromJira(jiraKey: string, progress?: vscode.Progress<{ m
   progress?.report({ message: `Workspace: applying edits (${edits.length})…` });
   await applyFileEdits(edits);
 
+  if (!autoCommit) {
+    return {
+      userMessage:
+        'Edits applied. Git commit is disabled (sg.git.autoCommit = false). Branch, push, and PR were skipped.'
+    };
+  }
+
   const baseBranch = git.getCurrentBranchName();
   const branch = `feature/${issue.key}`;
 
@@ -186,6 +199,12 @@ async function implementFromJira(jiraKey: string, progress?: vscode.Progress<{ m
   await git.stageAll();
   const commitMsg = `${issue.key}: ${issue.summary}`.slice(0, 72);
   await git.commit(commitMsg);
+
+  if (!autoPush) {
+    return {
+      userMessage: `Committed on \`${branch}\`. Push and PR are disabled (sg.git.autoPush = false). You can push manually when ready.`
+    };
+  }
 
   progress?.report({ message: 'GitHub: push + PR…' });
   await git.pushCurrentBranch(branch);
@@ -198,10 +217,10 @@ async function implementFromJira(jiraKey: string, progress?: vscode.Progress<{ m
     head: branch,
     base: baseBranch || 'main',
     title: `${issue.key}: ${issue.summary}`,
-    body: `Ticket Jira: ${jiraLink}\n\nRésumé:\n- ${issue.summary}\n`
+    body: `Jira: ${jiraLink}\n\nSummary:\n- ${issue.summary}\n`
   });
 
-  return { prUrl: pr.url };
+  return { prUrl: pr.url, userMessage: pr.url ? `PR created: ${pr.url}` : 'Done.' };
 }
 
 async function fetchJiraOnly(jiraKey: string): Promise<{ title: string; description: string; link?: string }> {
@@ -218,8 +237,8 @@ async function runImplement(jiraKeyMaybe: string | undefined, progress?: vscode.
   if (!key) {
     throw new Error('Provide a Jira key (e.g., PROJ-123).');
   }
-  const { prUrl } = await implementFromJira(key, progress);
-  return prUrl ? `PR created: ${prUrl}` : 'Done.';
+  const { userMessage } = await implementFromJira(key, progress);
+  return userMessage;
 }
 
 async function runFetch(jiraKeyMaybe: string | undefined): Promise<string> {

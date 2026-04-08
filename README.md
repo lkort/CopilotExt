@@ -25,9 +25,14 @@ Paste this into your VS Code `settings.json` and replace the values.
   "sg.jira.url": "https://your-company.atlassian.net",
   "sg.jira.token": "JIRA_PAT",
   "sg.github.url": "https://github.com",
-  "sg.github.token": "GITHUB_PAT_WITH_REPO_PERMS"
+  "sg.github.token": "GITHUB_PAT_WITH_REPO_PERMS",
+  "sg.git.autoCommit": true,
+  "sg.git.autoPush": true
 }
 ```
+
+- **`sg.git.autoCommit`** (default `true`): set to `false` to only apply file edits — no branch, commit, push, or PR.
+- **`sg.git.autoPush`** (default `true`): set to `false` to commit locally on `feature/<JIRA>` but skip push and PR (ignored if `autoCommit` is `false`).
 
 ### GitHub Enterprise
 
