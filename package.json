@@ -1,7 +1,7 @@
 {
   "name": "sg",
   "displayName": "SGA",
-  "description": "Agent VS Code: Jira -> Copilot (vscode.lm) -> modifications -> git commit -> PR GitHub.",
+  "description": "Agent VS Code: Jira -> Copilot (vscode.lm) -> git -> GitHub PR.",
   "version": "0.0.1",
   "publisher": "sg",
   "private": true,
@@ -36,24 +36,24 @@
         "sg.jira.url": {
           "type": "string",
           "default": "",
-          "description": "Base URL Jira (ex: https://mon-entreprise.atlassian.net)"
+          "description": "Jira base URL (e.g. https://your-company.atlassian.net)"
         },
         "sg.jira.token": {
           "type": "string",
           "default": "",
           "format": "password",
-          "description": "Jira Personal Access Token (PAT). Recommandé: stocker en secret et ne pas committer settings."
+          "description": "Jira API token (PAT). Sent as Bearer."
         },
         "sg.github.url": {
           "type": "string",
-          "default": "https://github.com",
-          "description": "Base URL GitHub (ou GitHub Enterprise), ex: https://alm-github.systems.uk.hsbc/"
+          "default": "",
+          "description": "GitHub or GitHub Enterprise base URL (e.g. https://github.com or https://ghe.example.com)"
         },
         "sg.github.token": {
           "type": "string",
           "default": "",
           "format": "password",
-          "description": "GitHub PAT (scope repo + pull_request / ou permissions équivalentes)"
+          "description": "GitHub PAT. Used with token or Bearer auth."
         }
       }
     },
@@ -61,11 +61,11 @@
       {
         "id": "sg-agent",
         "name": "SGA",
-        "description": "Pont Jira -> Copilot -> GitHub",
+        "description": "Jira -> Copilot -> GitHub",
         "commands": [
           {
             "name": "implement",
-            "description": "Implémente un ticket Jira dans le workspace courant. Usage: @sg /implement JIRA-123"
+            "description": "Implement a Jira ticket in the current workspace"
           }
         ]
       }

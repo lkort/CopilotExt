@@ -39,7 +39,7 @@ Set `sg.github.url` to your GitHub Enterprise base URL, for example:
 }
 ```
 
-The extension will call the API at `${githubUrl}/api/v3`.
+For **github.com**, set `sg.github.url` to `https://github.com` (the extension uses `https://api.github.com` for API calls). For **GitHub Enterprise**, the extension uses `${githubUrl}/api/v3`.
 
 ## Usage
 
