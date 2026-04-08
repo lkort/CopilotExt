@@ -1,0 +1,221 @@
+import * as vscode from 'vscode';
+
+export type JiraIssue = {
+  key: string;
+  summary: string;
+  descriptionText: string;
+};
+
+function requireSetting(cfg: vscode.WorkspaceConfiguration, key: string): string {
+  const v = cfg.get<string>(key);
+  if (!v || !v.trim()) {
+    throw new Error(`Paramètre manquant: sg.${key}. Configure-le dans settings.json.`);
+  }
+  return v.trim();
+}
+
+function toBasicAuth(email: string, token: string): string {
+  return Buffer.from(`${email}:${token}`, 'utf8').toString('base64');
+}
+
+// Jira description (ADF) -> texte raisonnable.
+function normalizeJiraDescription(description: any): string {
+  if (!description) return '';
+  if (typeof description === 'string') return description;
+
+  const parts: string[] = [];
+  const walk = (node: any) => {
+    if (!node) return;
+    if (typeof node === 'string') {
+      parts.push(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n);
+      return;
+    }
+    if (node.type === 'text' && typeof node.text === 'string') {
+      parts.push(node.text);
+      return;
+    }
+    if (node.content) walk(node.content);
+  };
+  walk(description);
+  return parts.join('').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export class JiraClient {
+  constructor(private readonly cfg: vscode.WorkspaceConfiguration) {}
+
+  async getIssue(issueKey: string): Promise<JiraIssue> {
+    const baseUrl = requireSetting(this.cfg, 'jira.url').replace(/\/+$/, '');
+    const email = requireSetting(this.cfg, 'jira.email');
+    const token = requireSetting(this.cfg, 'jira.token');
+
+    const url = `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,description`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Basic ${toBasicAuth(email, token)}`,
+        Accept: 'application/json'
+      }
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Jira: échec GET issue (${res.status}) ${body}`);
+    }
+    const json = (await res.json()) as any;
+    return {
+      key: json?.key ?? issueKey,
+      summary: json?.fields?.summary ?? '',
+      descriptionText: normalizeJiraDescription(json?.fields?.description)
+    };
+  }
+}
+
+export type GitRemoteInfo = { owner: string; repo: string; host: 'github.com' };
+
+function parseGitHubRemoteUrl(remoteUrl: string): GitRemoteInfo {
+  // Supporte:
+  // - https://github.com/owner/repo.git
+  // - git@github.com:owner/repo.git
+  const url = remoteUrl.trim();
+  const https = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (https) return { host: 'github.com', owner: https[1], repo: https[2] };
+  const ssh = url.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (ssh) return { host: 'github.com', owner: ssh[1], repo: ssh[2] };
+  throw new Error(`Remote GitHub non supportée: ${remoteUrl}`);
+}
+
+export class GitHubClient {
+  constructor(private readonly cfg: vscode.WorkspaceConfiguration) {}
+
+  async createPullRequest(params: {
+    remoteUrl: string;
+    head: string;
+    base: string;
+    title: string;
+    body: string;
+  }): Promise<{ url: string; number: number }> {
+    const token = requireSetting(this.cfg, 'github.token');
+    const remote = parseGitHubRemoteUrl(params.remoteUrl);
+
+    const apiUrl = `https://api.github.com/repos/${remote.owner}/${remote.repo}/pulls`;
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `token ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: params.title,
+        head: params.head,
+        base: params.base,
+        body: params.body
+      })
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`GitHub: échec création PR (${res.status}) ${body}`);
+    }
+
+    const json = (await res.json()) as any;
+    return { url: json?.html_url ?? '', number: json?.number ?? 0 };
+  }
+}
+
+type GitExtensionExports = { getAPI(version: 1): GitAPIv1 };
+type GitAPIv1 = {
+  repositories: Repository[];
+};
+
+type Repository = {
+  rootUri: vscode.Uri;
+  state: { HEAD?: { name?: string } };
+  remotes: Array<{ name: string; fetchUrl?: string; pushUrl?: string }>;
+  createBranch(name: string, checkout: boolean): Promise<void>;
+  checkout(branch: string): Promise<void>;
+  add(resources?: vscode.Uri[]): Promise<void>;
+  commit(message: string): Promise<void>;
+  push(remote?: string, name?: string, setUpstream?: boolean): Promise<void>;
+};
+
+export class GitService {
+  private readonly repo: Repository;
+
+  constructor() {
+    const ext = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
+    if (!ext) {
+      throw new Error("Extension Git intégrée introuvable (vscode.git).");
+    }
+    if (!ext.isActive) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      ext.activate();
+    }
+    const api = ext.exports.getAPI(1);
+    if (!api.repositories.length) {
+      throw new Error('Aucun repository Git détecté dans ce workspace.');
+    }
+    this.repo = api.repositories[0];
+  }
+
+  getCurrentBranchName(): string {
+    return this.repo.state.HEAD?.name ?? 'main';
+  }
+
+  getOriginRemoteUrl(): string {
+    const origin = this.repo.remotes.find((r) => r.name === 'origin') ?? this.repo.remotes[0];
+    const url = origin?.pushUrl ?? origin?.fetchUrl;
+    if (!url) throw new Error("Impossible de déterminer l'URL du remote (origin).");
+    return url;
+  }
+
+  async createAndCheckoutBranch(branch: string): Promise<void> {
+    await this.repo.createBranch(branch, true);
+  }
+
+  async stageAll(): Promise<void> {
+    await this.repo.add();
+  }
+
+  async commit(message: string): Promise<void> {
+    await this.repo.commit(message);
+  }
+
+  async pushCurrentBranch(branch: string): Promise<void> {
+    await this.repo.push('origin', branch, true);
+  }
+}
+
+export type FileEdit = {
+  path: string; // workspace-relative
+  content: string; // file complet (réécriture)
+};
+
+export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders?.length) throw new Error('Aucun workspace folder ouvert.');
+  const root = folders[0].uri;
+
+  const wsEdit = new vscode.WorkspaceEdit();
+  for (const e of edits) {
+    const uri = vscode.Uri.joinPath(root, e.path);
+    try {
+      await vscode.workspace.fs.stat(uri);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const fullRange = new vscode.Range(
+        doc.positionAt(0),
+        doc.positionAt(doc.getText().length)
+      );
+      wsEdit.replace(uri, fullRange, e.content);
+    } catch {
+      wsEdit.createFile(uri, { overwrite: true });
+      wsEdit.insert(uri, new vscode.Position(0, 0), e.content);
+    }
+  }
+
+  const ok = await vscode.workspace.applyEdit(wsEdit);
+  if (!ok) throw new Error("Échec de l'application des modifications au workspace.");
+}
+

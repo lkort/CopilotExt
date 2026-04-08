@@ -1,0 +1,83 @@
+{
+  "name": "sg",
+  "displayName": "@sg",
+  "description": "Agent VS Code: Jira -> Copilot (vscode.lm) -> modifications -> git commit -> PR GitHub.",
+  "version": "0.0.1",
+  "publisher": "sg",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "files": [
+    "dist/**",
+    "package.json",
+    "README.md"
+  ],
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:sg.implement",
+    "onChatParticipant:sg"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sg.implement",
+        "title": "@sg: Implement Jira ticket"
+      }
+    ],
+    "configuration": {
+      "title": "sg",
+      "properties": {
+        "sg.jira.url": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL Jira (ex: https://mon-entreprise.atlassian.net)"
+        },
+        "sg.jira.email": {
+          "type": "string",
+          "default": "",
+          "description": "Email Atlassian utilisé pour l'API Jira"
+        },
+        "sg.jira.token": {
+          "type": "string",
+          "default": "",
+          "description": "API Token Jira (Atlassian). Recommandé: stocker via Secret Storage et ne pas committer settings."
+        },
+        "sg.github.token": {
+          "type": "string",
+          "default": "",
+          "description": "GitHub PAT (scope repo + pull_request / ou permissions équivalentes)"
+        }
+      }
+    },
+    "chatParticipants": [
+      {
+        "id": "sg",
+        "name": "@sg",
+        "description": "Pont Jira -> Copilot -> GitHub",
+        "commands": [
+          {
+            "name": "implement",
+            "description": "Implémente un ticket Jira dans le workspace courant. Usage: @sg /implement JIRA-123"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.3",
+    "@vscode/vsce": "^3.6.0"
+  }
+}
