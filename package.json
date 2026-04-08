@@ -20,7 +20,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:sg.implement",
-    "onChatParticipant:sg"
+    "onChatParticipant:sg-agent"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -38,27 +38,29 @@
           "default": "",
           "description": "Base URL Jira (ex: https://mon-entreprise.atlassian.net)"
         },
-        "sg.jira.email": {
-          "type": "string",
-          "default": "",
-          "description": "Email Atlassian utilisé pour l'API Jira"
-        },
         "sg.jira.token": {
           "type": "string",
           "default": "",
-          "description": "API Token Jira (Atlassian). Recommandé: stocker via Secret Storage et ne pas committer settings."
+          "format": "password",
+          "description": "Jira Personal Access Token (PAT). Recommandé: stocker en secret et ne pas committer settings."
+        },
+        "sg.github.url": {
+          "type": "string",
+          "default": "https://github.com",
+          "description": "Base URL GitHub (ou GitHub Enterprise), ex: https://alm-github.systems.uk.hsbc/"
         },
         "sg.github.token": {
           "type": "string",
           "default": "",
+          "format": "password",
           "description": "GitHub PAT (scope repo + pull_request / ou permissions équivalentes)"
         }
       }
     },
     "chatParticipants": [
       {
-        "id": "sg",
-        "name": "@sg",
+        "id": "sg-agent",
+        "name": "sg",
         "description": "Pont Jira -> Copilot -> GitHub",
         "commands": [
           {

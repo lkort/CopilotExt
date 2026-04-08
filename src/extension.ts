@@ -260,7 +260,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const chatAny = (vscode as any).chat;
   if (chatAny?.createChatParticipant) {
-    const participant = chatAny.createChatParticipant('sg', async (request: any, ctx: any, stream: any, token: any) => {
+    const participant = chatAny.createChatParticipant('sg-agent', async (request: any, ctx: any, stream: any, token: any) => {
       try {
         const fullText = `${request?.command ?? ''} ${request?.prompt ?? ''}`.trim();
         const jiraKey = extractJiraKey(fullText);

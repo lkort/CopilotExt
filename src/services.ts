@@ -14,10 +14,6 @@ function requireSetting(cfg: vscode.WorkspaceConfiguration, key: string): string
   return v.trim();
 }
 
-function toBasicAuth(email: string, token: string): string {
-  return Buffer.from(`${email}:${token}`, 'utf8').toString('base64');
-}
-
 // Jira description (ADF) -> texte raisonnable.
 function normalizeJiraDescription(description: any): string {
   if (!description) return '';
@@ -49,13 +45,12 @@ export class JiraClient {
 
   async getIssue(issueKey: string): Promise<JiraIssue> {
     const baseUrl = requireSetting(this.cfg, 'jira.url').replace(/\/+$/, '');
-    const email = requireSetting(this.cfg, 'jira.email');
-    const token = requireSetting(this.cfg, 'jira.token');
+    const jiraToken = requireSetting(this.cfg, 'jira.token');
 
     const url = `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,description`;
     const res = await fetch(url, {
       headers: {
-        Authorization: `Basic ${toBasicAuth(email, token)}`,
+        Authorization: `Bearer ${jiraToken}`,
         Accept: 'application/json'
       }
     });
@@ -72,22 +67,31 @@ export class JiraClient {
   }
 }
 
-export type GitRemoteInfo = { owner: string; repo: string; host: 'github.com' };
+export type GitRemoteInfo = { owner: string; repo: string; host: string };
 
 function parseGitHubRemoteUrl(remoteUrl: string): GitRemoteInfo {
-  // Supporte:
-  // - https://github.com/owner/repo.git
-  // - git@github.com:owner/repo.git
   const url = remoteUrl.trim();
-  const https = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i);
-  if (https) return { host: 'github.com', owner: https[1], repo: https[2] };
-  const ssh = url.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i);
-  if (ssh) return { host: 'github.com', owner: ssh[1], repo: ssh[2] };
-  throw new Error(`Remote GitHub non supportée: ${remoteUrl}`);
+
+  // Supporte:
+  // - https://host/owner/repo(.git)
+  // - git@host:owner/repo(.git)
+  const https = url.match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (https) return { host: https[1], owner: https[2], repo: https[3] };
+  const ssh = url.match(/^git@([^:]+):([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (ssh) return { host: ssh[1], owner: ssh[2], repo: ssh[3] };
+
+  throw new Error(`Remote Git non supportée: ${remoteUrl}`);
 }
 
 export class GitHubClient {
   constructor(private readonly cfg: vscode.WorkspaceConfiguration) {}
+
+  private getApiBaseUrl(): string {
+    const githubUrl = (this.cfg.get<string>('github.url') ?? 'https://github.com').trim().replace(/\/+$/, '');
+    // Pour GitHub Enterprise: généralement {base}/api/v3
+    if (/\/api\/v3$/i.test(githubUrl)) return githubUrl;
+    return `${githubUrl}/api/v3`;
+  }
 
   async createPullRequest(params: {
     remoteUrl: string;
@@ -99,7 +103,7 @@ export class GitHubClient {
     const token = requireSetting(this.cfg, 'github.token');
     const remote = parseGitHubRemoteUrl(params.remoteUrl);
 
-    const apiUrl = `https://api.github.com/repos/${remote.owner}/${remote.repo}/pulls`;
+    const apiUrl = `${this.getApiBaseUrl()}/repos/${remote.owner}/${remote.repo}/pulls`;
     const res = await fetch(apiUrl, {
       method: 'POST',
       headers: {
