@@ -1,16 +1,16 @@
-# @sg — Agent Jira → Copilot → Git → Pull Request
+# @sg — Jira → Copilot → Git → Pull Request
 
-Extension VS Code qui automatise le flux:
+VS Code extension that automates the workflow:
 
-Lecture du ticket Jira → génération des changements via `vscode.lm` (Copilot) → application aux fichiers → création de branche → commit → push → création de Pull Request GitHub.
+Read Jira ticket → generate changes via `vscode.lm` (Copilot) → apply edits to workspace files → create branch → commit → push → create GitHub Pull Request.
 
-## Installation
+## Install
 
 ```bash
 npm install
 ```
 
-## Compilation
+## Build
 
 ```bash
 npm run compile
@@ -18,42 +18,57 @@ npm run compile
 
 ## Configuration (settings.json)
 
-Colle ceci dans ton `settings.json` (et remplace les valeurs).
+Paste this into your VS Code `settings.json` and replace the values.
 
 ```json
 {
-  "sg.jira.url": "https://mon-entreprise.atlassian.net",
-  "sg.jira.email": "prenom.nom@mon-entreprise.com",
-  "sg.jira.token": "ATLAS_API_TOKEN",
-  "sg.github.token": "GITHUB_PAT_REPO_SCOPE"
+  "sg.jira.url": "https://your-company.atlassian.net",
+  "sg.jira.token": "JIRA_PAT",
+  "sg.github.url": "https://github.com",
+  "sg.github.token": "GITHUB_PAT_WITH_REPO_PERMS"
 }
 ```
 
-## Utilisation
+### GitHub Enterprise
 
-- Via le Chat:
-  - Implémenter (langage naturel, sans `/implement`):
-    - `@sg PROJ-123 implémente ce ticket`
-    - `@sg PROJ-123 applique les changements`
-  - Lire seulement (sans implémenter):
-    - `@sg PROJ-123 donne-moi le résumé et la description (lecture seule)`
-    - `@sg PROJ-123 sans implémenter, affiche le ticket`
-- Via la palette de commandes:
-  - `@sg: Implement Jira ticket`
+Set `sg.github.url` to your GitHub Enterprise base URL, for example:
 
-## Test en mode Debug
+```json
+{
+  "sg.github.url": "https://alm-github.systems.uk.hsbc/"
+}
+```
 
-1. Ouvre ce dossier dans VS Code.
-2. Appuie sur `F5` (Run → Start Debugging) pour lancer une nouvelle fenêtre “Extension Development Host”.
-3. Dans la fenêtre de debug:
-   - Ouvre un workspace qui contient un dépôt Git (avec remote `origin` vers GitHub).
-   - Ouvre le Chat et lance par exemple:
-     - `@sg PROJ-123 implémente ce ticket`
-     - `@sg PROJ-123 affiche le ticket sans implémenter`
+The extension will call the API at `${githubUrl}/api/v3`.
 
-## Notes importantes
+## Usage
 
-- L’extension s’appuie sur l’extension Git intégrée (`vscode.git`) pour les opérations Git.
-- La création de PR utilise l’API REST GitHub via `sg.github.token`.
-- Les tokens sont configurés via `settings.json` comme demandé; évite de les committer dans un dépôt.
+### Chat (recommended)
+
+- Implement (natural language, no `/implement` required):
+  - `@sg PROJ-123 implement this ticket`
+  - `@sg PROJ-123 apply the changes`
+- Fetch only (read-only, no code changes, no git):
+  - `@sg PROJ-123 show me the summary and description (read-only)`
+  - `@sg PROJ-123 without implementing, display the ticket`
+
+### Command Palette
+
+- `@sg: Implement Jira ticket`
+
+## Debug / Test in VS Code
+
+1. Open this folder in VS Code.
+2. Press `F5` (Run → Start Debugging) to launch the “Extension Development Host” window.
+3. In the dev host window:
+   - Open a workspace that contains a Git repository with an `origin` remote pointing to GitHub.
+   - Open Chat and try:
+     - `@sg PROJ-123 implement this ticket`
+     - `@sg PROJ-123 show the ticket without implementing`
+
+## Notes
+
+- Git operations use the built-in Git extension (`vscode.git`).
+- PR creation uses GitHub REST API with `sg.github.token`.
+- Tokens are configured through `settings.json`; do not commit them.
 
