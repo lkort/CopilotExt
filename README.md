@@ -1,4 +1,4 @@
-# @sg — Jira → Copilot → Git → Pull Request
+# SGA — Jira → Copilot → Git → Pull Request
 
 VS Code extension that automates the workflow:
 
@@ -46,15 +46,15 @@ The extension will call the API at `${githubUrl}/api/v3`.
 ### Chat (recommended)
 
 - Implement (natural language, no `/implement` required):
-  - `@sg PROJ-123 implement this ticket`
-  - `@sg PROJ-123 apply the changes`
+  - `SGA PROJ-123 implement this ticket`
+  - `SGA PROJ-123 apply the changes`
 - Fetch only (read-only, no code changes, no git):
-  - `@sg PROJ-123 show me the summary and description (read-only)`
-  - `@sg PROJ-123 without implementing, display the ticket`
+  - `SGA PROJ-123 show me the summary and description (read-only)`
+  - `SGA PROJ-123 without implementing, display the ticket`
 
 ### Command Palette
 
-- `@sg: Implement Jira ticket`
+- `SGA: Implement Jira ticket`
 
 ## Debug / Test in VS Code
 
@@ -63,8 +63,8 @@ The extension will call the API at `${githubUrl}/api/v3`.
 3. In the dev host window:
    - Open a workspace that contains a Git repository with an `origin` remote pointing to GitHub.
    - Open Chat and try:
-     - `@sg PROJ-123 implement this ticket`
-     - `@sg PROJ-123 show the ticket without implementing`
+     - `SGA PROJ-123 implement this ticket`
+     - `SGA PROJ-123 show the ticket without implementing`
 
 ## Notes
 

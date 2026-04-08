@@ -1,6 +1,6 @@
 {
   "name": "sg",
-  "displayName": "@sg",
+  "displayName": "SGA",
   "description": "Agent VS Code: Jira -> Copilot (vscode.lm) -> modifications -> git commit -> PR GitHub.",
   "version": "0.0.1",
   "publisher": "sg",
@@ -27,7 +27,7 @@
     "commands": [
       {
         "command": "sg.implement",
-        "title": "@sg: Implement Jira ticket"
+        "title": "SGA: Implement Jira ticket"
       }
     ],
     "configuration": {
@@ -60,7 +60,7 @@
     "chatParticipants": [
       {
         "id": "sg-agent",
-        "name": "sg",
+        "name": "SGA",
         "description": "Pont Jira -> Copilot -> GitHub",
         "commands": [
           {

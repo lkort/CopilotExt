@@ -14,7 +14,7 @@ function getCfg(): vscode.WorkspaceConfiguration {
 
 function requireWorkspace(): void {
   if (!vscode.workspace.workspaceFolders?.length) {
-    throw new Error('No workspace folder is open. Open a project folder before using @sg.');
+    throw new Error('No workspace folder is open. Open a project folder before using SGA.');
   }
 }
 
@@ -63,7 +63,7 @@ function detectIntent(text: string): JiraIntent {
   ];
   if (implementHints.some((h) => t.includes(h))) return 'implement';
 
-  // Default: if a Jira key is mentioned in @sg, implement it (primary workflow).
+  // Default: if a Jira key is mentioned in SGA, implement it (primary workflow).
   return 'implement';
 }
 
@@ -235,7 +235,7 @@ export function activate(context: vscode.ExtensionContext) {
   const cmd = vscode.commands.registerCommand('sg.implement', async () => {
     try {
       const v = await vscode.window.showInputBox({
-        title: '@sg',
+        title: 'SGA',
         prompt: 'Enter a Jira key (e.g., PROJ-123)',
         validateInput: (s) => (extractJiraKey(s) ? undefined : 'Invalid Jira key')
       });
@@ -244,14 +244,14 @@ export function activate(context: vscode.ExtensionContext) {
       if (!jiraKey) throw new Error('Invalid Jira key.');
 
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: '@sg: running', cancellable: false },
+        { location: vscode.ProgressLocation.Notification, title: 'SGA: running', cancellable: false },
         async (progress) => {
           const msg = await runImplement(jiraKey, progress);
           void vscode.window.showInformationMessage(msg);
         }
       );
     } catch (e: any) {
-      void vscode.window.showErrorMessage(`@sg: ${e?.message ?? String(e)}`);
+      void vscode.window.showErrorMessage(`SGA: ${e?.message ?? String(e)}`);
     }
   });
   context.subscriptions.push(cmd);
@@ -265,7 +265,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (!jiraKey) {
           stream.markdown(
-            "Include a Jira key in your message (e.g., `PROJ-123`).\n\nExamples:\n- `@sg PROJ-123 implement this ticket`\n- `@sg PROJ-123 show me the summary (read-only)`"
+            "Include a Jira key in your message (e.g., `PROJ-123`).\n\nExamples:\n- `SGA PROJ-123 implement this ticket`\n- `SGA PROJ-123 show me the summary (read-only)`"
           );
           return;
         }
@@ -282,7 +282,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `@sg: ${jiraKey}`, cancellable: false },
+          { location: vscode.ProgressLocation.Notification, title: `SGA: ${jiraKey}`, cancellable: false },
           async (progress) => {
             const msg = await runImplement(jiraKey, progress);
             stream.markdown(msg);
