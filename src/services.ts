@@ -9,12 +9,12 @@ export type JiraIssue = {
 function requireSetting(cfg: vscode.WorkspaceConfiguration, key: string): string {
   const v = cfg.get<string>(key);
   if (!v || !v.trim()) {
-    throw new Error(`Paramètre manquant: sg.${key}. Configure-le dans settings.json.`);
+    throw new Error(`Missing setting: sg.${key}. Configure it in settings.json.`);
   }
   return v.trim();
 }
 
-// Jira description (ADF) -> texte raisonnable.
+// Jira description (ADF) -> reasonable plain text.
 function normalizeJiraDescription(description: any): string {
   if (!description) return '';
   if (typeof description === 'string') return description;
@@ -56,7 +56,7 @@ export class JiraClient {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(`Jira: échec GET issue (${res.status}) ${body}`);
+      throw new Error(`Jira: GET issue failed (${res.status}) ${body}`);
     }
     const json = (await res.json()) as any;
     return {
@@ -72,7 +72,7 @@ export type GitRemoteInfo = { owner: string; repo: string; host: string };
 function parseGitHubRemoteUrl(remoteUrl: string): GitRemoteInfo {
   const url = remoteUrl.trim();
 
-  // Supporte:
+  // Supports:
   // - https://host/owner/repo(.git)
   // - git@host:owner/repo(.git)
   const https = url.match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+?)(?:\.git)?$/i);
@@ -80,7 +80,7 @@ function parseGitHubRemoteUrl(remoteUrl: string): GitRemoteInfo {
   const ssh = url.match(/^git@([^:]+):([^/]+)\/([^/]+?)(?:\.git)?$/i);
   if (ssh) return { host: ssh[1], owner: ssh[2], repo: ssh[3] };
 
-  throw new Error(`Remote Git non supportée: ${remoteUrl}`);
+  throw new Error(`Unsupported Git remote URL: ${remoteUrl}`);
 }
 
 export class GitHubClient {
@@ -88,7 +88,7 @@ export class GitHubClient {
 
   private getApiBaseUrl(): string {
     const githubUrl = (this.cfg.get<string>('github.url') ?? 'https://github.com').trim().replace(/\/+$/, '');
-    // Pour GitHub Enterprise: généralement {base}/api/v3
+    // For GitHub Enterprise: typically {base}/api/v3
     if (/\/api\/v3$/i.test(githubUrl)) return githubUrl;
     return `${githubUrl}/api/v3`;
   }
@@ -121,7 +121,7 @@ export class GitHubClient {
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(`GitHub: échec création PR (${res.status}) ${body}`);
+      throw new Error(`GitHub: PR creation failed (${res.status}) ${body}`);
     }
 
     const json = (await res.json()) as any;
@@ -151,7 +151,7 @@ export class GitService {
   constructor() {
     const ext = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
     if (!ext) {
-      throw new Error("Extension Git intégrée introuvable (vscode.git).");
+      throw new Error("Built-in Git extension not found (vscode.git).");
     }
     if (!ext.isActive) {
       // eslint-disable-next-line @typescript-eslint/no-floating-promises
@@ -159,7 +159,7 @@ export class GitService {
     }
     const api = ext.exports.getAPI(1);
     if (!api.repositories.length) {
-      throw new Error('Aucun repository Git détecté dans ce workspace.');
+      throw new Error('No Git repository detected in this workspace.');
     }
     this.repo = api.repositories[0];
   }
@@ -171,7 +171,7 @@ export class GitService {
   getOriginRemoteUrl(): string {
     const origin = this.repo.remotes.find((r) => r.name === 'origin') ?? this.repo.remotes[0];
     const url = origin?.pushUrl ?? origin?.fetchUrl;
-    if (!url) throw new Error("Impossible de déterminer l'URL du remote (origin).");
+    if (!url) throw new Error("Unable to determine the remote URL (origin).");
     return url;
   }
 
@@ -194,12 +194,12 @@ export class GitService {
 
 export type FileEdit = {
   path: string; // workspace-relative
-  content: string; // file complet (réécriture)
+  content: string; // full file content (rewrite)
 };
 
 export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
   const folders = vscode.workspace.workspaceFolders;
-  if (!folders?.length) throw new Error('Aucun workspace folder ouvert.');
+  if (!folders?.length) throw new Error('No workspace folder is open.');
   const root = folders[0].uri;
 
   const wsEdit = new vscode.WorkspaceEdit();
@@ -220,6 +220,6 @@ export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
   }
 
   const ok = await vscode.workspace.applyEdit(wsEdit);
-  if (!ok) throw new Error("Échec de l'application des modifications au workspace.");
+  if (!ok) throw new Error('Failed to apply edits to the workspace.');
 }
 

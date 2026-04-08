@@ -14,7 +14,7 @@ function getCfg(): vscode.WorkspaceConfiguration {
 
 function requireWorkspace(): void {
   if (!vscode.workspace.workspaceFolders?.length) {
-    throw new Error('Aucun workspace ouvert. Ouvre un dossier/projet avant de lancer @sg.');
+    throw new Error('No workspace folder is open. Open a project folder before using @sg.');
   }
 }
 
@@ -23,68 +23,66 @@ type JiraIntent = 'implement' | 'fetch';
 function detectIntent(text: string): JiraIntent {
   const t = text.toLowerCase();
 
-  // Indices "lecture seule"
+  // "Read-only" hints
   const fetchHints = [
-    'résume',
+    'summarize',
     'resume',
-    'résumé',
     'summary',
     'description',
-    'définition',
     'definition',
-    'détails',
     'details',
-    'explique',
-    'c’est quoi',
-    "c'est quoi",
+    'explain',
+    "what is",
     'montre',
-    'affiche',
-    'lis le ticket',
-    'récupère',
+    'show',
+    'display',
+    'read the ticket',
+    'fetch',
     'recupere',
-    'sans implémenter',
-    'sans implementer',
-    'ne modifie pas',
-    'sans toucher au code',
-    'lecture seule',
+    'without implementing',
+    "don't implement",
+    'do not modify',
+    "don't modify",
+    'no code changes',
+    'read-only',
     'read only'
   ];
   if (fetchHints.some((h) => t.includes(h))) return 'fetch';
 
-  // Indices "implémentation"
+  // "Implementation" hints
   const implementHints = [
-    'implémente',
     'implemente',
+    'implement',
     'code',
-    'modifie',
-    'applique',
-    'corrige',
+    'modify',
+    'apply',
+    'fix',
     'fix',
     'feat',
-    'fais le changement'
+    'make the change'
   ];
   if (implementHints.some((h) => t.includes(h))) return 'implement';
 
-  // Par défaut: si un ticket est mentionné dans @sg, on implémente (workflow principal).
+  // Default: if a Jira key is mentioned in @sg, implement it (primary workflow).
   return 'implement';
 }
 
 async function pickCopilotChatModel(): Promise<any> {
-  // API récente: vscode.lm.selectChatModels. Selon la version de VS Code, le filtre peut varier.
+  // Recent API: vscode.lm.selectChatModels. Exact filtering can vary by VS Code version.
   const lmAny = (vscode as any).lm;
   if (!lmAny?.selectChatModels) {
     throw new Error(
-      "API vscode.lm indisponible. Mets VS Code à jour et active GitHub Copilot."
+      'vscode.lm API is unavailable. Update VS Code and ensure GitHub Copilot is enabled.'
     );
   }
 
   const models = await lmAny.selectChatModels({ vendor: 'copilot' });
   if (models?.length) return models[0];
 
-  // fallback: aucun filtre
+  // Fallback: no filter
   const anyModels = await lmAny.selectChatModels({});
   if (!anyModels?.length) {
-    throw new Error('Aucun modèle de chat disponible via vscode.lm.');
+    throw new Error('No chat model is available via vscode.lm.');
   }
   return anyModels[0];
 }
@@ -97,29 +95,29 @@ async function generateEditsWithModel(params: {
   const model = await pickCopilotChatModel();
 
   const system = [
-    "Tu es un agent de modification de code dans VS Code.",
-    "Objectif: appliquer le ticket Jira dans le workspace courant.",
-    "Contraintes:",
-    "- Produis UNIQUEMENT un JSON valide (pas de markdown).",
-    "- Schéma attendu: {\"edits\":[{\"path\":\"chemin/relatif\",\"content\":\"contenu complet du fichier\"}]}",
-    "- 'path' est relatif à la racine du workspace.",
-    "- 'content' est le contenu complet (réécriture) du fichier cible.",
-    "- Si tu dois créer un nouveau fichier, fournis son contenu complet.",
-    "- Fais le minimum de changements nécessaires pour implémenter le ticket.",
-    "- N'inclus jamais de secrets/tokens dans les fichiers."
+    'You are a code-editing agent running inside VS Code.',
+    'Goal: implement the Jira ticket in the current workspace.',
+    'Constraints:',
+    '- Output ONLY valid JSON (no markdown).',
+    '- Expected schema: {"edits":[{"path":"relative/path","content":"full file content"}]}',
+    "- 'path' is relative to the workspace root.",
+    "- 'content' is the full content of the target file (rewrite).",
+    '- If you need to create a new file, provide its full content.',
+    '- Make the minimal set of changes necessary to implement the ticket.',
+    '- Never include secrets/tokens in any file.'
   ].join('\n');
 
   const user = [
     `Ticket Jira: ${params.jiraKey}`,
     `Summary: ${params.summary}`,
-    `Description:`,
+    'Description:',
     params.description || '(vide)',
     '',
-    'Contexte:',
-    '- Tu as accès au contenu du projet local (workspace).',
-    "- Si tu as besoin d'inspecter des fichiers existants, suppose que tu peux les lire; mais ta sortie doit être uniquement le JSON d'edits.",
+    'Context:',
+    '- You have access to the local project (workspace).',
+    "- If you need to inspect existing files, assume you can read them; but your output must be ONLY the JSON edits.",
     '',
-    "Retourne le JSON maintenant."
+    'Return the JSON now.'
   ].join('\n');
 
   const messages = [
@@ -134,11 +132,11 @@ async function generateEditsWithModel(params: {
   const jsonStart = text.indexOf('{');
   const jsonEnd = text.lastIndexOf('}');
   if (jsonStart < 0 || jsonEnd < 0) {
-    throw new Error(`Réponse modèle invalide (pas de JSON). Réponse: ${text.slice(0, 300)}`);
+    throw new Error(`Invalid model response (no JSON). Response: ${text.slice(0, 300)}`);
   }
   const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
   if (!parsed?.edits || !Array.isArray(parsed.edits)) {
-    throw new Error("Réponse modèle invalide (champ 'edits' absent).");
+    throw new Error("Invalid model response (missing 'edits').");
   }
   return parsed.edits as FileEdit[];
 }
@@ -165,23 +163,23 @@ async function implementFromJira(jiraKey: string, progress?: vscode.Progress<{ m
   const gh = new GitHubClient(cfg);
   const git = new GitService();
 
-  progress?.report({ message: `Jira: récupération ${jiraKey}…` });
+  progress?.report({ message: `Jira: fetching ${jiraKey}…` });
   const issue = await jira.getIssue(jiraKey);
 
-  progress?.report({ message: `Copilot: génération des modifications…` });
+  progress?.report({ message: 'Copilot: generating changes…' });
   const edits = await generateEditsWithModel({
     jiraKey: issue.key,
     summary: issue.summary,
     description: issue.descriptionText
   });
 
-  progress?.report({ message: `Workspace: application des modifications (${edits.length})…` });
+  progress?.report({ message: `Workspace: applying edits (${edits.length})…` });
   await applyFileEdits(edits);
 
   const baseBranch = git.getCurrentBranchName();
   const branch = `feature/${issue.key}`;
 
-  progress?.report({ message: `Git: création branche ${branch}…` });
+  progress?.report({ message: `Git: creating branch ${branch}…` });
   await git.createAndCheckoutBranch(branch);
 
   progress?.report({ message: 'Git: stage + commit…' });
@@ -218,18 +216,18 @@ async function fetchJiraOnly(jiraKey: string): Promise<{ title: string; descript
 async function runImplement(jiraKeyMaybe: string | undefined, progress?: vscode.Progress<{ message?: string }>): Promise<string> {
   const key = jiraKeyMaybe?.trim() || undefined;
   if (!key) {
-    throw new Error('Usage: @sg /implement JIRA-123 (ou via la commande sg.implement).');
+    throw new Error('Provide a Jira key (e.g., PROJ-123).');
   }
   const { prUrl } = await implementFromJira(key, progress);
-  return prUrl ? `PR créée: ${prUrl}` : 'Terminé.';
+  return prUrl ? `PR created: ${prUrl}` : 'Done.';
 }
 
 async function runFetch(jiraKeyMaybe: string | undefined): Promise<string> {
   const key = jiraKeyMaybe?.trim() || undefined;
-  if (!key) throw new Error('Donne un ID Jira (ex: PROJ-123).');
+  if (!key) throw new Error('Provide a Jira key (e.g., PROJ-123).');
   const { title, description, link } = await fetchJiraOnly(key);
-  const desc = description?.trim() ? description.trim() : '(description vide)';
-  const header = link ? `${title}\nLien: ${link}` : title;
+  const desc = description?.trim() ? description.trim() : '(empty description)';
+  const header = link ? `${title}\nLink: ${link}` : title;
   return `${header}\n\n${desc}`;
 }
 
@@ -237,16 +235,16 @@ export function activate(context: vscode.ExtensionContext) {
   const cmd = vscode.commands.registerCommand('sg.implement', async () => {
     try {
       const v = await vscode.window.showInputBox({
-        title: '@sg /implement',
-        prompt: 'Entre un ID Jira (ex: PROJ-123)',
-        validateInput: (s) => (extractJiraKey(s) ? undefined : 'ID Jira invalide')
+        title: '@sg',
+        prompt: 'Enter a Jira key (e.g., PROJ-123)',
+        validateInput: (s) => (extractJiraKey(s) ? undefined : 'Invalid Jira key')
       });
       if (!v) return;
       const jiraKey = extractJiraKey(v);
-      if (!jiraKey) throw new Error('ID Jira invalide.');
+      if (!jiraKey) throw new Error('Invalid Jira key.');
 
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: '@sg: implémentation', cancellable: false },
+        { location: vscode.ProgressLocation.Notification, title: '@sg: running', cancellable: false },
         async (progress) => {
           const msg = await runImplement(jiraKey, progress);
           void vscode.window.showInformationMessage(msg);
@@ -266,7 +264,9 @@ export function activate(context: vscode.ExtensionContext) {
         const jiraKey = extractJiraKey(fullText);
 
         if (!jiraKey) {
-          stream.markdown("Donne un ID Jira dans ton message (ex: `PROJ-123`).\n\nExemples:\n- `@sg PROJ-123 implémente ce ticket`\n- `@sg PROJ-123 donne-moi le résumé sans implémenter`");
+          stream.markdown(
+            "Include a Jira key in your message (e.g., `PROJ-123`).\n\nExamples:\n- `@sg PROJ-123 implement this ticket`\n- `@sg PROJ-123 show me the summary (read-only)`"
+          );
           return;
         }
 
@@ -289,7 +289,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
         );
       } catch (e: any) {
-        stream.markdown(`Erreur: ${e?.message ?? String(e)}`);
+        stream.markdown(`Error: ${e?.message ?? String(e)}`);
       }
     });
 
