@@ -1,8 +1,8 @@
 {
   "name": "sg",
   "displayName": "SGA",
-  "description": "Agent VS Code: Jira -> Copilot (vscode.lm) -> git -> GitHub PR.",
-  "version": "0.0.1",
+  "description": "Multi-agent VS Code extension: Jira + Copilot + GitHub Enterprise.",
+  "version": "0.1.0",
   "publisher": "sg",
   "private": true,
   "engines": {
@@ -42,40 +42,50 @@
           "type": "string",
           "default": "",
           "format": "password",
-          "description": "Jira API token (PAT). Sent as Bearer."
+          "description": "Jira Personal Access Token. Sent as Bearer."
         },
         "sg.github.url": {
           "type": "string",
           "default": "",
-          "description": "GitHub or GitHub Enterprise base URL (e.g. https://github.com or https://ghe.example.com)"
+          "description": "GitHub Enterprise base URL (e.g. https://ghe.example.com). API = {url}/api/v3"
         },
         "sg.github.token": {
           "type": "string",
           "default": "",
           "format": "password",
-          "description": "GitHub PAT. Used with token or Bearer auth."
-        },
-        "sg.git.autoCommit": {
-          "type": "boolean",
-          "default": true,
-          "description": "If false, applies edits only — no branch, commit, push, or PR."
-        },
-        "sg.git.autoPush": {
-          "type": "boolean",
-          "default": true,
-          "description": "If false, commits locally but does not push or open a PR (ignored when autoCommit is false)."
+          "description": "GitHub Personal Access Token. Sent as token auth."
         }
       }
     },
     "chatParticipants": [
       {
         "id": "sg-agent",
-        "name": "SGA",
-        "description": "Jira -> Copilot -> GitHub",
+        "name": "sg",
+        "description": "Intelligent Jira / Copilot / GitHub agent",
         "commands": [
           {
             "name": "implement",
-            "description": "Implement a Jira ticket in the current workspace"
+            "description": "Implement a Jira ticket"
+          },
+          {
+            "name": "read",
+            "description": "Read and explain a Jira ticket"
+          },
+          {
+            "name": "create",
+            "description": "Create a new Jira ticket"
+          },
+          {
+            "name": "analyze",
+            "description": "Analyze project metrics"
+          },
+          {
+            "name": "extract",
+            "description": "Export tickets as Markdown/CSV"
+          },
+          {
+            "name": "push",
+            "description": "Push last committed branch and create PR"
           }
         ]
       }
@@ -90,6 +100,6 @@
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.6.3",
-    "@vscode/vsce": "^3.6.0"
+    "@vscode/vsce": "^2.32.0"
   }
 }
