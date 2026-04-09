@@ -5,6 +5,7 @@ import {
   FileEdit,
   GitHubClient,
   GitService,
+  isIssueDone,
   JiraClient,
   ProjectMetrics
 } from './services';
@@ -974,11 +975,6 @@ function daysBetween(fromIso: string, toMs: number): number {
   return Math.max(0, Math.round((toMs - t) / (24 * 60 * 60 * 1000)));
 }
 
-function isDoneStatus(status: string): boolean {
-  const s = String(status ?? '').toLowerCase();
-  return s === 'done' || s === 'closed';
-}
-
 function mermaidDoneVsNotDone(project: string, done: number, notDone: number): string {
   return [
     '```mermaid',
@@ -1008,9 +1004,7 @@ function mermaidAgingHistogram(project: string, buckets: Array<{ label: string; 
 }
 
 function computeVelocityFromIssues(issues: any[]): { completedCount: number; totalStoryPoints: number } {
-  const completed = issues.filter((i: any) => {
-    return isDoneStatus(String(i?.status ?? ''));
-  });
+  const completed = issues.filter((i: any) => isIssueDone(i));
   const totalSP = completed.reduce((sum: number, i: any) => sum + (Number(i?.storyPoints ?? 0) || 0), 0);
   return { completedCount: completed.length, totalStoryPoints: totalSP };
 }
@@ -1019,13 +1013,19 @@ async function handleAnalyzeDynamic(
   params: Record<string, any>,
   stream: any
 ): Promise<void> {
-  const project = String(params.project ?? '').trim();
+  let project = String(params.project ?? '').trim();
   const days = Number(params.days ?? 14) || 14;
   const query = String(params.query ?? '').trim();
   const refine = !!params.refine;
   const confirm = !!params.confirm;
 
-  if (!project) { stream.markdown('Provide a project key (e.g., EQC).'); return; }
+  if (!project && confirm && pendingLargeFetch) {
+    project = pendingLargeFetch.spec.project;
+  }
+  if (!project) {
+    stream.markdown('Provide a project key (e.g., EQC).');
+    return;
+  }
 
   const baseQuery = query || `Analyze ${project} dynamically over last ${days} days`;
   let reportSpec: ReportSpec;
@@ -1062,6 +1062,12 @@ async function handleAnalyzeDynamic(
     };
   }
 
+  // Restore last large query when user only sends "confirm" (same JQL as pending).
+  if (confirm && pendingLargeFetch && !query) {
+    spec = pendingLargeFetch.spec;
+    reportSpec = pendingLargeFetch.reportSpec;
+  }
+
   lastDynamicSpec = spec;
   lastReportSpec = reportSpec;
 
@@ -1070,42 +1076,57 @@ async function handleAnalyzeDynamic(
   stream.markdown(`**JQL:** \`${spec.jql}\`\n\n`);
 
   const jira = new JiraClient(cfg());
-
-  // Large-volume guardrail: count first, then ask confirmation before downloading everything.
-  const total = await jira.countIssues(spec.jql);
-  stream.markdown(`**${total}** issue(s) matched.\n\n`);
-  if (!total) return;
-
-  const LARGE_THRESHOLD = Math.max(0, Number(cfg().get<number>('analyze.largeThreshold', 2000)) || 2000);
-  if (total > LARGE_THRESHOLD && !confirm) {
-    pendingLargeFetch = { spec, reportSpec, total };
-    stream.markdown(
-      `This query matches **${total}** issues. Fetching them all may take time.\n\n` +
-      `To continue, rerun with confirmation:\n` +
-      `- \`@sg analyze-dynamic confirm\`\n\n` +
-      `Or refine the scope:\n` +
-      `- \`@sg analyze-dynamic refine only last 14 days\`\n` +
-      `- \`@sg analyze-dynamic refine component = RustRunner\`\n`
-    );
-    return;
-  }
-
-  // If user confirms without restating the query, reuse the pending large fetch.
-  if (confirm && pendingLargeFetch && !query) {
-    spec = pendingLargeFetch.spec;
-    reportSpec = pendingLargeFetch.reportSpec;
-  }
-
-  // Cache reuse: if same JQL recently fetched, reuse it.
   const CACHE_TTL_MS = 5 * 60 * 1000;
   const fetchNow = Date.now();
+
+  // Cache first (market practice): avoid duplicate count/fetch for same JQL within TTL.
   let issues: any[];
-  if (lastExtractCache && lastExtractCache.jql === spec.jql && (fetchNow - lastExtractCache.fetchedAt) < CACHE_TTL_MS) {
+  if (lastExtractCache && lastExtractCache.jql === spec.jql && fetchNow - lastExtractCache.fetchedAt < CACHE_TTL_MS) {
     issues = lastExtractCache.issues;
-    stream.markdown(`Reusing cached extraction (**${issues.length}** issues).\n\n`);
+    stream.markdown(
+      `**${lastExtractCache.total}** issue(s) in scope (reusing cache: **${issues.length}** fetched).\n\n`
+    );
   } else {
-    stream.markdown('Fetching data from Jira…\n\n');
-    const paged = await jira.searchIssuesPaged(spec.jql, null); // fetch ALL pages
+    let total = 0;
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'SGA · Jira',
+        cancellable: false
+      },
+      async progress => {
+        progress.report({ message: 'Counting issues…' });
+        total = await jira.countIssues(spec.jql);
+      }
+    );
+    stream.markdown(`**${total}** issue(s) matched.\n\n`);
+    if (!total) return;
+
+    const LARGE_THRESHOLD = Math.max(0, Number(cfg().get<number>('analyze.largeThreshold', 2000)) || 2000);
+    if (total > LARGE_THRESHOLD && !confirm) {
+      pendingLargeFetch = { spec, reportSpec, total };
+      stream.markdown(
+        `This query matches **${total}** issues. Fetching them all may take time.\n\n` +
+          `To continue, rerun with confirmation:\n` +
+          `- \`@sg analyze-dynamic confirm\`\n\n` +
+          `Or refine the scope:\n` +
+          `- \`@sg analyze-dynamic refine only last 14 days\`\n` +
+          `- \`@sg analyze-dynamic refine component = RustRunner\`\n`
+      );
+      return;
+    }
+
+    const paged = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'SGA · Jira',
+        cancellable: false
+      },
+      async progress => {
+        progress.report({ message: `Fetching up to ${total} issues (paginated)…` });
+        return jira.searchIssuesPaged(spec.jql, null);
+      }
+    );
     issues = paged.issues;
     lastExtractCache = { jql: spec.jql, total: paged.total, fetchedAt: fetchNow, issues };
     stream.markdown(`Fetched **${issues.length}** issue(s).\n\n`);
@@ -1125,7 +1146,7 @@ async function handleAnalyzeDynamic(
 
   // Derivations for DM: WIP aging, stale, blocked-ish
   const now = Date.now();
-  const notDone = issues.filter(i => !isDoneStatus(i.status));
+  const notDone = issues.filter(i => !isIssueDone(i));
   const done = issues.length - notDone.length;
   const notDoneCount = notDone.length;
 
@@ -1163,9 +1184,7 @@ async function handleAnalyzeDynamic(
 
   if (reportSpec.sections.includes('delivery')) {
     stream.markdown('### Delivery\n\n');
-    const topDone = issues
-      .filter(i => isDoneStatus(i.status))
-      .slice(0, 10);
+    const topDone = issues.filter(i => isIssueDone(i)).slice(0, 10);
     if (!topDone.length) {
       stream.markdown('_No Done/Closed issues in this filtered scope._\n\n');
     } else {
@@ -1241,6 +1260,7 @@ async function handleAnalyzeDynamic(
           key: i.key,
           summary: i.summary,
           status: i.status,
+          statusCategoryKey: i.statusCategoryKey,
           assignee: i.assignee,
           storyPoints: i.storyPoints,
           issueType: i.issueType,

@@ -80,6 +80,26 @@ async function fetchWithTimeout(
   }
 }
 
+/** Jira Cloud may return 429; honor Retry-After when present (market practice). */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string,
+  maxAttempts = 4
+): Promise<Response> {
+  let last: Response | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await fetchWithTimeout(url, init, label);
+    last = res;
+    if (res.status !== 429) return res;
+    const ra = res.headers.get('retry-after');
+    const sec = ra ? parseInt(ra, 10) : NaN;
+    const delayMs = Number.isFinite(sec) && sec > 0 ? Math.min(sec * 1000, 60_000) : 1000 * (attempt + 1);
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  return last!;
+}
+
 // ============================================================
 // Jira description normalizer (handles ADF and plain text)
 // ============================================================
@@ -112,6 +132,8 @@ export type JiraIssue = {
   summary: string;
   descriptionText: string;
   status: string;
+  /** Jira REST: fields.status.statusCategory.key — "done" | "indeterminate" | "new" */
+  statusCategoryKey: string;
   storyPoints: number;
   issueType: string;
   components: string[];
@@ -121,6 +143,19 @@ export type JiraIssue = {
   updated: string;
   resolutionDate: string;
 };
+
+/**
+ * Market-standard “done” detection: prefer status category, then common status names.
+ * Works across Jira Cloud / Data Center where status names vary (“Resolved”, “Terminé”, etc.).
+ */
+export function isIssueDone(issue: Pick<JiraIssue, 'status' | 'statusCategoryKey'>): boolean {
+  const cat = (issue.statusCategoryKey ?? '').toLowerCase();
+  if (cat === 'done') return true;
+  const s = (issue.status ?? '').toLowerCase();
+  if (['done', 'closed', 'resolved', 'complete', 'completed'].includes(s)) return true;
+  if (/\b(terminé|termine|fini|résolu|resolu)\b/i.test(s)) return true;
+  return false;
+}
 
 /** Try to extract story points from common custom-field names. */
 function extractStoryPoints(
@@ -160,6 +195,7 @@ function mapIssue(raw: any, storyPointsFieldId?: string): JiraIssue {
     summary: f.summary ?? '',
     descriptionText: normalizeJiraDescription(f.description),
     status: f.status?.name ?? '',
+    statusCategoryKey: typeof f.status?.statusCategory?.key === 'string' ? f.status.statusCategory.key : '',
     storyPoints: extractStoryPoints(f, storyPointsFieldId),
     issueType: f.issuetype?.name ?? '',
     components: Array.isArray(f.components) ? f.components.map((c: any) => c?.name).filter(Boolean) : [],
@@ -242,7 +278,7 @@ export class JiraClient {
 
     for (const v of versions) {
       const url = `${this.base()}/rest/api/${v}${pathAfterVersion}`;
-      const res = await fetchWithTimeout(url, init, 'Jira');
+      const res = await fetchWithRetry(url, init, 'Jira');
       last = res;
       if (res.status !== 404) return res;
     }
@@ -558,10 +594,8 @@ export async function computeProjectMetrics(
     `project = ${project} AND updatedDate >= -${days}d ORDER BY updated DESC`
   );
 
-  // 2 — Completed (Done) in the period
-  const completed = allIssues.filter(i =>
-    i.status.toLowerCase() === 'done' || i.status.toLowerCase() === 'closed'
-  );
+  // 2 — Completed (Done) in the period — use status category when available
+  const completed = allIssues.filter(i => isIssueDone(i));
 
   // 3 — Reopened (heuristic: status contains "reopen")
   const reopened = allIssues.filter(i =>
@@ -578,7 +612,7 @@ export async function computeProjectMetrics(
   const fiveDaysAgo = Date.now() - 5 * 24 * 60 * 60 * 1000;
   const blocked = allIssues
     .filter(i => {
-      const notDone = !['done', 'closed'].includes(i.status.toLowerCase());
+      const notDone = !isIssueDone(i);
       const stale = new Date(i.updated).getTime() < fiveDaysAgo;
       return notDone && stale;
     })

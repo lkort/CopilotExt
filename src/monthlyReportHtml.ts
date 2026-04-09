@@ -3,10 +3,13 @@
  * Uses Chart.js from CDN — open the file in a browser.
  */
 
+import { isIssueDone } from './services';
+
 export type MonthlyIssueRow = {
   key: string;
   summary: string;
   status: string;
+  statusCategoryKey?: string;
   assignee: string;
   storyPoints: number;
   issueType: string;
@@ -84,7 +87,9 @@ export function buildMonthlyJiraHtmlReport(opts: {
 }): string {
   const { title, jql, issues, generatedAtIso } = opts;
   const totalPts = issues.reduce((s, i) => s + (Number(i.storyPoints) || 0), 0);
-  const doneLike = issues.filter(i => /done|closed|resolved|termin/i.test(i.status));
+  const doneLike = issues.filter(i =>
+    isIssueDone({ status: i.status, statusCategoryKey: i.statusCategoryKey ?? '' })
+  );
   const byLabel = sumByLabel(issues);
   const byAssignee = sumByAssignee(issues);
   const split = rtbCtbSplit(issues);

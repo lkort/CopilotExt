@@ -127,6 +127,14 @@ Output includes:
 - Mermaid **bar chart** for top assignees
 - A compact table of the latest updated issues
 
+## Best practices (alignement “marché”)
+
+- **Done / velocity**: l’extension utilise `status.statusCategory.key === done` quand Jira le renvoie, puis des noms de statut courants (Done, Closed, Resolved, etc.) — plus fiable que le seul nom “Done”.
+- **Gros volumes**: seuil configurable `sg.analyze.largeThreshold` + confirmation avant téléchargement paginé; cache 5 min sur le même JQL.
+- **Story points**: si tout est à 0, renseigner `sg.jira.storyPointsFieldId` (id du champ custom Jira).
+- **API Jira**: retry automatique sur réponse **429** (rate limit) avec en-tête `Retry-After` / backoff.
+- **UX**: opérations Jira longues affichent une **notification de progression** (VS Code).
+
 ## Notes
 
 - Git operations use the built-in `vscode.git` extension.
