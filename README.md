@@ -38,7 +38,9 @@ Only 4 settings — URL + token for each service:
 ```json
 {
   "sg.jira.url": "https://your-company.atlassian.net",
-  "sg.jira.token": "JIRA_PAT",
+  "sg.jira.token": "JIRA_TOKEN_OR_PAT",
+  "sg.jira.authType": "auto",
+  "sg.jira.user": "email@company.com",
   "sg.github.url": "https://ghe.example.com",
   "sg.github.token": "GITHUB_PAT"
 }
@@ -46,7 +48,12 @@ Only 4 settings — URL + token for each service:
 
 ### Auth details
 
-- **Jira**: `Authorization: Bearer <token>` + `Accept: application/json` (prevents HTML login pages).
+- **Jira**:
+  - Supports **Bearer** and **Basic** auth.
+  - `sg.jira.authType` can be `bearer`, `basic`, or `auto`.
+  - In `auto`, Basic is used when `sg.jira.user` is set (or when the token looks like `user:token`), otherwise Bearer.
+  - Adds `Accept: application/json` (helps avoid HTML login pages).
+  - Tries both Jira REST API versions: `/rest/api/2` then `/rest/api/3`.
 - **GitHub Enterprise**: `Authorization: token <token>`. API endpoint: `{sg.github.url}/api/v3`.
 
 ## Debug / Test

@@ -66,7 +66,14 @@ async function collectText(resp: any): Promise<string> {
   if (t && typeof t !== 'string' && typeof t[Symbol.asyncIterator] === 'function') {
     let out = '';
     for await (const chunk of t) {
-      out += typeof chunk === 'string' ? chunk : String(chunk);
+      if (typeof chunk === 'string') {
+        out += chunk;
+      } else if (chunk && typeof chunk === 'object') {
+        // Some shapes: { value }, { text }, { content }
+        out += (chunk as any).value ?? (chunk as any).text ?? (chunk as any).content ?? '';
+      } else {
+        out += String(chunk ?? '');
+      }
     }
     return out;
   }
@@ -109,6 +116,9 @@ async function askLm(system: string, user: string): Promise<string> {
 /** Ask the LM and parse the first JSON object found in its response. */
 async function askLmJson(system: string, user: string): Promise<any> {
   const raw = await askLm(system, user);
+  if (!raw || !raw.trim()) {
+    throw new Error('LM returned an empty response.');
+  }
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
   if (start < 0 || end < 0) {
@@ -161,6 +171,11 @@ ANALYZE_PROJECT — project metrics / analytics
 
 EXTRACT_DATA — list/export tickets
   params: { "project": "PROJ", "jql": "", "format": "markdown" }
+  Examples:
+  - "list all issues from EQC where component = RustRunner"
+    => intent=EXTRACT_DATA, params.project="EQC", params.jql="project = EQC AND component = \\"RustRunner\\" ORDER BY updated DESC"
+  - "get all EQC tickets assigned to Alice updated in last 7 days"
+    => intent=EXTRACT_DATA with an appropriate JQL filter
 
 PUSH — push an already-committed branch and optionally create a PR
   params: { "issueKey": "PROJ-123" }
@@ -171,12 +186,61 @@ Rules:
 - Extract project keys and issue keys accurately.
 - days defaults to 14 if the user doesn't specify.`;
 
+function classifyIntentHeuristic(userText: string): ClassifiedIntent {
+  const text = userText.trim();
+  const issueKey = text.match(JIRA_KEY_RE)?.[0];
+
+  // If user explicitly references a Jira key, default to READ_ISSUE unless they clearly want something else.
+  if (issueKey) {
+    const t = text.toLowerCase();
+    if (t.includes('implement')) return { intent: 'IMPLEMENT', params: { issueKey, push: false, createPr: false } };
+    if (t.includes('push') || t.includes('pr')) return { intent: 'PUSH', params: { issueKey } };
+    return { intent: 'READ_ISSUE', params: { issueKey } };
+  }
+
+  const lower = text.toLowerCase();
+  const project = (text.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1]; // best-effort
+
+  const looksLikeExport =
+    /\b(export|extract|list|get all|all (the )?(jiras|jira|issues|tickets))\b/i.test(text) ||
+    /\bproject\s*=\s*[A-Z][A-Z0-9]+\b/i.test(text) ||
+    /\bjql\b/i.test(text) ||
+    /\bcomponent\b/i.test(text);
+
+  const looksLikeAnalyze =
+    /\b(analy(s|z)e|metrics|report|throughput|velocity|backlog|stability)\b/i.test(text);
+
+  if (looksLikeExport && project) {
+    // If component filter is present, build a minimal safe JQL from it.
+    const compMatch = text.match(/\bcomponent\s*=\s*("?)([^"\n]+)\1/i);
+    const component = compMatch?.[2]?.trim();
+    const jql = component
+      ? `project = ${project} AND component = "${component.replace(/"/g, '\\"')}" ORDER BY updated DESC`
+      : `project = ${project} ORDER BY updated DESC`;
+    return { intent: 'EXTRACT_DATA', params: { project, jql, format: 'markdown' } };
+  }
+
+  if (looksLikeAnalyze && project) {
+    const daysMatch = text.match(/\b(\d+)\s*(day|days|d)\b/i);
+    const days = daysMatch ? Number(daysMatch[1]) : 14;
+    return { intent: 'ANALYZE_PROJECT', params: { project, days } };
+  }
+
+  // Default fallback: EXTRACT_DATA if a project is present; otherwise READ_ISSUE (will prompt for key).
+  if (project) return { intent: 'EXTRACT_DATA', params: { project, jql: `project = ${project} ORDER BY updated DESC`, format: 'markdown' } };
+  return { intent: 'READ_ISSUE', params: {} };
+}
+
 async function classifyIntent(userMessage: string): Promise<ClassifiedIntent> {
-  const json = await askLmJson(CLASSIFY_SYSTEM, userMessage);
-  return {
-    intent: json.intent ?? 'READ_ISSUE',
-    params: json.params ?? {}
-  };
+  try {
+    const json = await askLmJson(CLASSIFY_SYSTEM, userMessage);
+    return {
+      intent: json.intent ?? 'READ_ISSUE',
+      params: json.params ?? {}
+    };
+  } catch {
+    return classifyIntentHeuristic(userMessage);
+  }
 }
 
 // ============================================================

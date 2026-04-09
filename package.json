@@ -42,7 +42,22 @@
           "type": "string",
           "default": "",
           "format": "password",
-          "description": "Jira Personal Access Token. Sent as Bearer."
+          "description": "Jira API token / PAT. Used as Bearer by default, or as the password part for Basic auth."
+        },
+        "sg.jira.user": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Jira username/email for Basic auth. If set and sg.jira.authType=auto, Basic auth is used."
+        },
+        "sg.jira.authType": {
+          "type": "string",
+          "default": "bearer",
+          "enum": [
+            "auto",
+            "bearer",
+            "basic"
+          ],
+          "description": "Jira auth scheme. auto = Basic when sg.jira.user is set (or token looks like user:token), otherwise Bearer."
         },
         "sg.github.url": {
           "type": "string",

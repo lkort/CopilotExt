@@ -18,6 +18,16 @@ export function requireSetting(
   return String(v).trim();
 }
 
+/** Read a VS Code setting; return undefined if missing/blank. */
+function optionalSetting(
+  cfg: vscode.WorkspaceConfiguration,
+  key: string
+): string | undefined {
+  const v = cfg.get<string>(key);
+  const s = (v ?? '').toString().trim();
+  return s ? s : undefined;
+}
+
 /** Build an AbortSignal with a timeout (gracefully returns undefined if unsupported). */
 function abortSignal(ms: number): AbortSignal | undefined {
   try {
@@ -141,11 +151,37 @@ function mapIssue(raw: any): JiraIssue {
 export class JiraClient {
   constructor(private readonly cfg: vscode.WorkspaceConfiguration) {}
 
-  /** Common headers: Bearer token + JSON accept. */
-  private headers(): Record<string, string> {
+  /**
+   * Determine and build auth header.
+   * - bearer: Authorization: Bearer <token>
+   * - basic:  Authorization: Basic <base64(user:token)>
+   * - auto: basic if sg.jira.user is set OR token looks like user:token, else bearer
+   */
+  private authHeader(): string {
     const token = requireSetting(this.cfg, 'jira.token');
+    const user = optionalSetting(this.cfg, 'jira.user');
+    const authTypeRaw = (optionalSetting(this.cfg, 'jira.authType') ?? 'bearer').toLowerCase();
+
+    const tokenLooksLikeUserToken = token.includes(':') && !token.trim().startsWith('Bearer ');
+    const mode =
+      authTypeRaw === 'auto'
+        ? (user || tokenLooksLikeUserToken ? 'basic' : 'bearer')
+        : authTypeRaw;
+
+    if (mode === 'basic') {
+      const creds = user ? `${user}:${token}` : token;
+      const b64 = Buffer.from(creds, 'utf8').toString('base64');
+      return 'Basic ' + b64;
+    }
+
+    // default: bearer
+    return 'Bearer ' + token;
+  }
+
+  /** Common headers: Basic/Bearer + JSON accept. */
+  private headers(): Record<string, string> {
     return {
-      'Authorization': 'Bearer ' + token,
+      'Authorization': this.authHeader(),
       'Accept': 'application/json',
       'Content-Type': 'application/json'
     };
@@ -155,14 +191,38 @@ export class JiraClient {
     return requireSetting(this.cfg, 'jira.url').replace(/\/+$/, '');
   }
 
+  /**
+   * Jira API version fallback.
+   * Some instances only support v2 (`/rest/api/2`), others prefer v3 (`/rest/api/3`).
+   * We try v2 then v3 and return the first non-404 response.
+   */
+  private async requestJira(
+    pathAfterVersion: string,
+    init: RequestInit,
+    opLabel: string
+  ): Promise<Response> {
+    const versions = ['2', '3'];
+    let last: Response | undefined;
+
+    for (const v of versions) {
+      const url = `${this.base()}/rest/api/${v}${pathAfterVersion}`;
+      const res = await fetchWithTimeout(url, init, 'Jira');
+      last = res;
+      if (res.status !== 404) return res;
+    }
+
+    // fall back to last response if all were 404 (shouldn't happen often)
+    return last!;
+  }
+
   // ---- READ ---------------------------------------------------
   async getIssue(issueKey: string): Promise<JiraIssue> {
-    const url =
-      `${this.base()}/rest/api/2/issue/${encodeURIComponent(issueKey)}` +
+    const path =
+      `/issue/${encodeURIComponent(issueKey)}` +
       `?fields=summary,description,status,assignee,created,updated,resolutiondate,` +
       `story_points,customfield_10016,customfield_10028,customfield_10002`;
 
-    const res = await fetchWithTimeout(url, { method: 'GET', headers: this.headers() }, 'Jira');
+    const res = await this.requestJira(path, { method: 'GET', headers: this.headers() }, 'GET issue');
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -179,9 +239,8 @@ export class JiraClient {
     description: string;
     issueType: string;
   }): Promise<{ key: string }> {
-    const url = `${this.base()}/rest/api/2/issue`;
-    const res = await fetchWithTimeout(
-      url,
+    const res = await this.requestJira(
+      `/issue`,
       {
         method: 'POST',
         headers: this.headers(),
@@ -194,7 +253,7 @@ export class JiraClient {
           }
         })
       },
-      'Jira'
+      'CREATE issue'
     );
 
     if (!res.ok) {
@@ -216,14 +275,14 @@ export class JiraClient {
     const perPage = Math.min(maxResults, 100);
 
     while (startAt < maxResults) {
-      const url =
-        `${this.base()}/rest/api/2/search` +
+      const path =
+        `/search` +
         `?jql=${encodeURIComponent(jql)}` +
         `&startAt=${startAt}&maxResults=${perPage}` +
         `&fields=summary,description,status,assignee,created,updated,resolutiondate,` +
         `story_points,customfield_10016,customfield_10028,customfield_10002`;
 
-      const res = await fetchWithTimeout(url, { method: 'GET', headers: this.headers() }, 'Jira');
+      const res = await this.requestJira(path, { method: 'GET', headers: this.headers() }, 'SEARCH');
 
       if (!res.ok) {
         const body = await res.text().catch(() => '');
