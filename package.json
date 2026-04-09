@@ -74,6 +74,11 @@
           "type": "number",
           "default": 2000,
           "description": "Threshold (issue count) above which analyze-dynamic asks for confirmation before fetching all matching issues."
+        },
+        "sg.jira.storyPointsFieldId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Jira custom field id for Story Points (e.g. customfield_10016). If set, it overrides automatic detection."
         }
       }
     },

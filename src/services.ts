@@ -115,6 +115,7 @@ export type JiraIssue = {
   storyPoints: number;
   issueType: string;
   components: string[];
+  labels: string[];
   assignee: string;
   created: string;
   updated: string;
@@ -122,29 +123,47 @@ export type JiraIssue = {
 };
 
 /** Try to extract story points from common custom-field names. */
-function extractStoryPoints(fields: Record<string, any>): number {
+function extractStoryPoints(
+  fields: Record<string, any>,
+  explicitFieldId?: string
+): number {
+  if (explicitFieldId) {
+    const v = fields[explicitFieldId.trim()];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
   const candidates = [
     fields.story_points,
     fields.customfield_10016,   // Jira Cloud default
     fields.customfield_10028,   // common alternative
     fields.customfield_10002,
+    fields.customfield_10004,
+    fields.customfield_10106
   ];
   for (const v of candidates) {
-    if (typeof v === 'number') return v;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
   }
-  return 0;
+  // Fallback: unknown customfield_* numeric (typical story point range)
+  let best = 0;
+  for (const [k, v] of Object.entries(fields)) {
+    if (!k.startsWith('customfield_')) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    if (v <= 0 || v > 200) continue;
+    best = Math.max(best, v);
+  }
+  return best;
 }
 
-function mapIssue(raw: any): JiraIssue {
+function mapIssue(raw: any, storyPointsFieldId?: string): JiraIssue {
   const f = raw?.fields ?? {};
   return {
     key: raw?.key ?? '',
     summary: f.summary ?? '',
     descriptionText: normalizeJiraDescription(f.description),
     status: f.status?.name ?? '',
-    storyPoints: extractStoryPoints(f),
+    storyPoints: extractStoryPoints(f, storyPointsFieldId),
     issueType: f.issuetype?.name ?? '',
     components: Array.isArray(f.components) ? f.components.map((c: any) => c?.name).filter(Boolean) : [],
+    labels: Array.isArray(f.labels) ? f.labels.filter((x: unknown) => typeof x === 'string') : [],
     assignee: f.assignee?.displayName ?? 'Unassigned',
     created: f.created ?? '',
     updated: f.updated ?? '',
@@ -154,6 +173,20 @@ function mapIssue(raw: any): JiraIssue {
 
 export class JiraClient {
   constructor(private readonly cfg: vscode.WorkspaceConfiguration) {}
+
+  private storyPointsFieldId(): string | undefined {
+    return optionalSetting(this.cfg, 'jira.storyPointsFieldId');
+  }
+
+  /** Fields list for issue payloads — include explicit story-points field if configured. */
+  private issueFieldsParam(): string {
+    const base =
+      'summary,description,status,assignee,created,updated,resolutiondate,' +
+      'labels,issuetype,components,story_points,customfield_10016,customfield_10028,customfield_10002';
+    const id = this.storyPointsFieldId();
+    if (id && !base.includes(id)) return `${base},${id}`;
+    return base;
+  }
 
   /**
    * Determine and build auth header.
@@ -239,10 +272,7 @@ export class JiraClient {
 
   // ---- READ ---------------------------------------------------
   async getIssue(issueKey: string): Promise<JiraIssue> {
-    const path =
-      `/issue/${encodeURIComponent(issueKey)}` +
-      `?fields=summary,description,status,assignee,created,updated,resolutiondate,` +
-      `issuetype,components,story_points,customfield_10016,customfield_10028,customfield_10002`;
+    const path = `/issue/${encodeURIComponent(issueKey)}` + `?fields=${encodeURIComponent(this.issueFieldsParam())}`;
 
     const res = await this.requestJira(path, { method: 'GET', headers: this.headers() });
 
@@ -251,7 +281,7 @@ export class JiraClient {
       throw new Error(`Jira: GET ${issueKey} failed (${res.status}) ${body.slice(0, 800)}`);
     }
 
-    return mapIssue(await parseJsonResponse(res, 'Jira'));
+    return mapIssue(await parseJsonResponse(res, 'Jira'), this.storyPointsFieldId());
   }
 
   // ---- CREATE -------------------------------------------------
@@ -305,8 +335,7 @@ export class JiraClient {
         `/search` +
         `?jql=${encodeURIComponent(jql)}` +
         `&startAt=${startAt}&maxResults=${perPage}` +
-        `&fields=summary,description,status,assignee,created,updated,resolutiondate,` +
-        `issuetype,components,story_points,customfield_10016,customfield_10028,customfield_10002`;
+        `&fields=${encodeURIComponent(this.issueFieldsParam())}`;
 
       const res = await this.requestJira(path, { method: 'GET', headers: this.headers() });
 
@@ -320,7 +349,7 @@ export class JiraClient {
       const issues: any[] = json?.issues ?? [];
       if (!issues.length) break;
 
-      for (const raw of issues) allIssues.push(mapIssue(raw));
+      for (const raw of issues) allIssues.push(mapIssue(raw, this.storyPointsFieldId()));
       startAt += issues.length;
       if (startAt >= total) break;
     }

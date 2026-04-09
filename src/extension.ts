@@ -8,6 +8,7 @@ import {
   JiraClient,
   ProjectMetrics
 } from './services';
+import { buildMonthlyJiraHtmlReport } from './monthlyReportHtml';
 
 // ============================================================
 // Constants
@@ -191,6 +192,8 @@ PUSH — push an already-committed branch and optionally create a PR
 
 Rules:
 - Default push and createPr to false unless the user explicitly says "push" or "PR".
+- NEVER classify as PUSH for French "projet" (project) — that is not a pull request.
+- If the user asks to analyze / report / dashboard / epic filter / metrics, prefer ANALYZE_DYNAMIC or ANALYZE_PROJECT over PUSH or READ_ISSUE.
 - If the user says "don't push" or "commit only", set push=false.
 - Extract project keys and issue keys accurately.
 - days defaults to 14 if the user doesn't specify.`;
@@ -513,19 +516,81 @@ async function buildReportSpec(
   return { audience, tone, sections: ensuredSections, charts, groupBy, topN, thresholds, title };
 }
 
+function looksLikeAnalyzeIntent(text: string): boolean {
+  return (
+    /\b(analy(s|z)e|analyse|rapport|report|metrics|dashboard|velocity|v[ée]locit[ée]|performer|top|filtre|filter|p[ée]riode|insights|insight|kpi)\b/i.test(
+      text
+    ) ||
+    /\b(epic|project)\s*=/i.test(text) ||
+    /\bjiras?\s+(pour|dans|du|sous|avec)\b/i.test(text) ||
+    /\b(epic|tickets?)\s+(sous|du|de)\b/i.test(text)
+  );
+}
+
+/** True only for explicit git push / PR intent — NOT French "projet" (contains substring "pr"). */
+function wantsPushIntent(text: string): boolean {
+  const t = text.toLowerCase();
+  if (looksLikeAnalyzeIntent(text)) return false;
+  if (/\b(analy(s|z)e|analyse|implement)\b/i.test(t)) return false;
+  if (/\bpush\b/.test(t) && /\b(git|origin|remote|branch)\b/.test(t)) return true;
+  if (/\bpull request\b/.test(t) || /\bmerge request\b/.test(t)) return true;
+  if (/\bpr\s*#/.test(t)) return true;
+  if (/\bpousser\b/.test(t) && /\b(git|branche)\b/.test(t)) return true;
+  return false;
+}
+
+function extractProjectKeyFromText(text: string): string | undefined {
+  const pq = text.match(/\bproject\s*=\s*([A-Z][A-Z0-9]{1,9})\b/i);
+  if (pq) return pq[1].toUpperCase();
+  const m = text.match(/\b(?:projet|project)\s+([A-Z][A-Z0-9]{1,9})\b/i);
+  if (m) return m[1].toUpperCase();
+  const words = text.match(/\b([A-Z][A-Z0-9]{1,9})\b/g) ?? [];
+  const skip = new Set([
+    'JIRA',
+    'FOR',
+    'THE',
+    'AND',
+    'ALL',
+    'DAYS',
+    'DAY',
+    'LAST',
+    'TOP',
+    'SG',
+    'CSV',
+    'HTML',
+    'JSON',
+    'API',
+    'SQL'
+  ]);
+  for (const w of words) {
+    if (!skip.has(w) && w.length >= 2 && w.length <= 10) return w;
+  }
+  return undefined;
+}
+
+function extractDaysFromText(text: string, fallback: number): number {
+  const m = text.match(/\b(\d+)\s*(day|days|d|jour|jours)\b/i);
+  return m ? Number(m[1]) : fallback;
+}
+
 function classifyIntentHeuristic(userText: string): ClassifiedIntent {
   const text = userText.trim();
   const issueKey = text.match(JIRA_KEY_RE)?.[0];
 
-  // If user explicitly references a Jira key, default to READ_ISSUE unless they clearly want something else.
+  // If user explicitly references a Jira key, prefer analysis when the message is clearly analytics.
   if (issueKey) {
     const t = text.toLowerCase();
+    if (looksLikeAnalyzeIntent(text)) {
+      const project = extractProjectKeyFromText(text) ?? issueKey.split('-')[0];
+      const days = extractDaysFromText(text, 14);
+      return { intent: 'ANALYZE_DYNAMIC', params: { project, days, query: text, refine: false } };
+    }
     if (t.includes('implement')) return { intent: 'IMPLEMENT', params: { issueKey, push: false, createPr: false } };
-    if (t.includes('push') || t.includes('pr')) return { intent: 'PUSH', params: { issueKey } };
+    if (wantsPushIntent(text)) return { intent: 'PUSH', params: { issueKey } };
     return { intent: 'READ_ISSUE', params: { issueKey } };
   }
 
-  const project = (text.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1]; // best-effort
+  const project = extractProjectKeyFromText(text) ?? (text.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1]; // best-effort
 
   const looksLikeExport =
     /\b(export|extract|list|get all|all (the )?(jiras|jira|issues|tickets))\b/i.test(text) ||
@@ -550,8 +615,7 @@ function classifyIntentHeuristic(userText: string): ClassifiedIntent {
   }
 
   if (looksLikeAnalyze && project) {
-    const daysMatch = text.match(/\b(\d+)\s*(day|days|d)\b/i);
-    const days = daysMatch ? Number(daysMatch[1]) : 14;
+    const days = extractDaysFromText(text, 14);
     if (looksLikeDynamicAnalyze) {
       return { intent: 'ANALYZE_DYNAMIC', params: { project, days, query: text, refine: false } };
     }
@@ -566,10 +630,15 @@ function classifyIntentHeuristic(userText: string): ClassifiedIntent {
 async function classifyIntent(userMessage: string): Promise<ClassifiedIntent> {
   try {
     const json = await askLmJson(CLASSIFY_SYSTEM, userMessage);
-    return {
-      intent: json.intent ?? 'READ_ISSUE',
-      params: json.params ?? {}
-    };
+    const intent = (json.intent ?? 'READ_ISSUE') as Intent;
+    const params = json.params ?? {};
+    if (intent === 'PUSH' && !wantsPushIntent(userMessage)) {
+      return classifyIntentHeuristic(userMessage);
+    }
+    if ((intent === 'PUSH' || intent === 'READ_ISSUE') && looksLikeAnalyzeIntent(userMessage)) {
+      return classifyIntentHeuristic(userMessage);
+    }
+    return { intent, params };
   } catch {
     return classifyIntentHeuristic(userMessage);
   }
@@ -1161,6 +1230,42 @@ async function handleAnalyzeDynamic(
     stream.markdown('\n');
   }
 
+  // Monthly-style HTML dashboard (single file, open in browser)
+  const folders = vscode.workspace.workspaceFolders;
+  if (folders?.length) {
+    try {
+      const html = buildMonthlyJiraHtmlReport({
+        title: `${spec.project} — Monthly Jira report`,
+        jql: spec.jql,
+        issues: issues.map(i => ({
+          key: i.key,
+          summary: i.summary,
+          status: i.status,
+          assignee: i.assignee,
+          storyPoints: i.storyPoints,
+          issueType: i.issueType,
+          labels: Array.isArray(i.labels) ? i.labels : [],
+          updated: i.updated,
+          resolutionDate: i.resolutionDate
+        })),
+        generatedAtIso: new Date().toISOString()
+      });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const dir = vscode.Uri.joinPath(folders[0].uri, 'reports');
+      await vscode.workspace.fs.createDirectory(dir);
+      const fileUri = vscode.Uri.joinPath(dir, `jira-monthly-report-${stamp}.html`);
+      await vscode.workspace.fs.writeFile(fileUri, Buffer.from(html, 'utf8'));
+      stream.markdown(`\n### Monthly HTML report\n\n`);
+      stream.markdown(
+        `Open the generated file in your browser: \`${fileUri.fsPath}\`\n\n` +
+        `_(Chart.js, dark theme — similar to a “monthly Jira report” dashboard.)_\n`
+      );
+      await vscode.env.openExternal(fileUri);
+    } catch {
+      stream.markdown('\n_(Could not write HTML report to workspace; chat report above is still valid.)_\n');
+    }
+  }
+
   stream.markdown('\n### AI insights\n\n');
   const prompt = JSON.stringify({
     spec,
@@ -1334,9 +1439,9 @@ export function activate(context: vscode.ExtensionContext) {
             const p = prompt.replace(/^\s*analyze-dynamic\s+/i, '').trim();
             const confirm = /^\s*(confirm|ok|oui|go)\b/i.test(p);
             const withoutConfirm = p.replace(/^\s*(confirm|ok|oui|go)\b[:\s-]*/i, '').trim();
-            const proj = (p.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1] ?? '';
-            const daysMatch = p.match(/\b(\d+)\s*(day|days|d)\b/i);
-            const days = daysMatch ? Number(daysMatch[1]) : 14;
+            const proj =
+              (p.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1] ?? extractProjectKeyFromText(p) ?? '';
+            const days = extractDaysFromText(p, 14);
             const refine = /^\s*(refine|affine|ajuste|ajuster|raffine|raffiner)\b/i.test(p);
             const cleaned = p.replace(/^\s*(refine|affine|ajuste|ajuster|raffine|raffiner)\b[:\s-]*/i, '').trim();
             const q = confirm ? withoutConfirm : (cleaned || p);

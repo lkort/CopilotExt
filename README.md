@@ -69,6 +69,20 @@ You can configure the threshold:
 }
 ```
 
+## Story points field
+
+If story points show as `0` for all issues, set your Jira custom field id explicitly:
+
+```json
+{
+  "sg.jira.storyPointsFieldId": "customfield_10016"
+}
+```
+
+## Monthly HTML report
+
+`ANALYZE_DYNAMIC` writes a **single-file HTML dashboard** under `reports/jira-monthly-report-*.html` in the workspace (Chart.js, dark theme) and tries to open it in the browser.
+
 ## Debug / Test
 
 1. Open this folder in VS Code.
