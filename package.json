@@ -69,6 +69,11 @@
           "default": "",
           "format": "password",
           "description": "GitHub Personal Access Token. Sent as token auth."
+        },
+        "sg.analyze.largeThreshold": {
+          "type": "number",
+          "default": 2000,
+          "description": "Threshold (issue count) above which analyze-dynamic asks for confirmation before fetching all matching issues."
         }
       }
     },
@@ -93,6 +98,10 @@
           {
             "name": "analyze",
             "description": "Analyze project metrics"
+          },
+          {
+            "name": "analyze-dynamic",
+            "description": "Dynamic analysis with natural language filters + visual report"
           },
           {
             "name": "extract",

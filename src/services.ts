@@ -113,6 +113,8 @@ export type JiraIssue = {
   descriptionText: string;
   status: string;
   storyPoints: number;
+  issueType: string;
+  components: string[];
   assignee: string;
   created: string;
   updated: string;
@@ -141,6 +143,8 @@ function mapIssue(raw: any): JiraIssue {
     descriptionText: normalizeJiraDescription(f.description),
     status: f.status?.name ?? '',
     storyPoints: extractStoryPoints(f),
+    issueType: f.issuetype?.name ?? '',
+    components: Array.isArray(f.components) ? f.components.map((c: any) => c?.name).filter(Boolean) : [],
     assignee: f.assignee?.displayName ?? 'Unassigned',
     created: f.created ?? '',
     updated: f.updated ?? '',
@@ -198,8 +202,7 @@ export class JiraClient {
    */
   private async requestJira(
     pathAfterVersion: string,
-    init: RequestInit,
-    opLabel: string
+    init: RequestInit
   ): Promise<Response> {
     const versions = ['2', '3'];
     let last: Response | undefined;
@@ -215,14 +218,33 @@ export class JiraClient {
     return last!;
   }
 
+  /** Count issues matching a JQL without fetching them. */
+  async countIssues(jql: string): Promise<number> {
+    const path =
+      `/search` +
+      `?jql=${encodeURIComponent(jql)}` +
+      `&startAt=0&maxResults=0` +
+      `&fields=none`;
+
+    const res = await this.requestJira(path, { method: 'GET', headers: this.headers() });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Jira: COUNT failed (${res.status}) ${body.slice(0, 800)}`);
+    }
+
+    const json = await parseJsonResponse(res, 'Jira');
+    return Number(json?.total ?? 0) || 0;
+  }
+
   // ---- READ ---------------------------------------------------
   async getIssue(issueKey: string): Promise<JiraIssue> {
     const path =
       `/issue/${encodeURIComponent(issueKey)}` +
       `?fields=summary,description,status,assignee,created,updated,resolutiondate,` +
-      `story_points,customfield_10016,customfield_10028,customfield_10002`;
+      `issuetype,components,story_points,customfield_10016,customfield_10028,customfield_10002`;
 
-    const res = await this.requestJira(path, { method: 'GET', headers: this.headers() }, 'GET issue');
+    const res = await this.requestJira(path, { method: 'GET', headers: this.headers() });
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -239,22 +261,18 @@ export class JiraClient {
     description: string;
     issueType: string;
   }): Promise<{ key: string }> {
-    const res = await this.requestJira(
-      `/issue`,
-      {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({
-          fields: {
-            project: { key: params.project.toUpperCase() },
-            summary: params.summary,
-            description: params.description,
-            issuetype: { name: params.issueType || 'Story' }
-          }
-        })
-      },
-      'CREATE issue'
-    );
+    const res = await this.requestJira(`/issue`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        fields: {
+          project: { key: params.project.toUpperCase() },
+          summary: params.summary,
+          description: params.description,
+          issuetype: { name: params.issueType || 'Story' }
+        }
+      })
+    });
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -266,23 +284,31 @@ export class JiraClient {
   }
 
   // ---- SEARCH (JQL) -------------------------------------------
-  async searchIssues(
+  /**
+   * Search issues with paging.
+   * @param maxResults If undefined, fetches up to 200 (historical default). If null, fetches ALL pages.
+   */
+  async searchIssuesPaged(
     jql: string,
-    maxResults = 200
-  ): Promise<JiraIssue[]> {
+    maxResults: number | null = 200
+  ): Promise<{ issues: JiraIssue[]; total: number; truncated: boolean }> {
     const allIssues: JiraIssue[] = [];
     let startAt = 0;
-    const perPage = Math.min(maxResults, 100);
+    const pageSize = 100;
+    const limit = maxResults === null ? Number.POSITIVE_INFINITY : Math.max(0, maxResults);
 
-    while (startAt < maxResults) {
+    let total = 0;
+
+    while (startAt < limit) {
+      const perPage = Math.min(pageSize, Math.max(0, limit - startAt));
       const path =
         `/search` +
         `?jql=${encodeURIComponent(jql)}` +
         `&startAt=${startAt}&maxResults=${perPage}` +
         `&fields=summary,description,status,assignee,created,updated,resolutiondate,` +
-        `story_points,customfield_10016,customfield_10028,customfield_10002`;
+        `issuetype,components,story_points,customfield_10016,customfield_10028,customfield_10002`;
 
-      const res = await this.requestJira(path, { method: 'GET', headers: this.headers() }, 'SEARCH');
+      const res = await this.requestJira(path, { method: 'GET', headers: this.headers() });
 
       if (!res.ok) {
         const body = await res.text().catch(() => '');
@@ -290,15 +316,25 @@ export class JiraClient {
       }
 
       const json = await parseJsonResponse(res, 'Jira');
+      total = Number(json?.total ?? total) || total;
       const issues: any[] = json?.issues ?? [];
       if (!issues.length) break;
 
       for (const raw of issues) allIssues.push(mapIssue(raw));
       startAt += issues.length;
-      if (startAt >= (json?.total ?? 0)) break;
+      if (startAt >= total) break;
     }
 
-    return allIssues;
+    const truncated = allIssues.length < total && maxResults !== null;
+    return { issues: allIssues, total, truncated };
+  }
+
+  async searchIssues(
+    jql: string,
+    maxResults = 200
+  ): Promise<JiraIssue[]> {
+    const { issues } = await this.searchIssuesPaged(jql, maxResults);
+    return issues;
   }
 }
 

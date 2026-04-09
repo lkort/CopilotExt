@@ -140,6 +140,7 @@ type Intent =
   | 'CREATE_ISSUE'
   | 'IMPLEMENT'
   | 'ANALYZE_PROJECT'
+  | 'ANALYZE_DYNAMIC'
   | 'EXTRACT_DATA'
   | 'PUSH';
 
@@ -153,7 +154,7 @@ Given the user message, classify it into EXACTLY one intent and extract paramete
 Return ONLY valid JSON — no markdown, no explanation.
 
 {
-  "intent": "<one of READ_ISSUE | CREATE_ISSUE | IMPLEMENT | ANALYZE_PROJECT | EXTRACT_DATA | PUSH>",
+  "intent": "<one of READ_ISSUE | CREATE_ISSUE | IMPLEMENT | ANALYZE_PROJECT | ANALYZE_DYNAMIC | EXTRACT_DATA | PUSH>",
   "params": { ... }
 }
 
@@ -168,6 +169,14 @@ IMPLEMENT — generate code from a ticket, commit; push/PR only if user explicit
 
 ANALYZE_PROJECT — project metrics / analytics
   params: { "project": "PROJ", "days": 15 }
+
+ANALYZE_DYNAMIC — dynamic analysis driven by a natural language filter
+  params: {
+    "project": "PROJ",
+    "query": "natural language filter and report preferences",
+    "days": 14,
+    "refine": false
+  }
 
 EXTRACT_DATA — list/export tickets
   params: { "project": "PROJ", "jql": "", "format": "markdown" }
@@ -186,6 +195,324 @@ Rules:
 - Extract project keys and issue keys accurately.
 - days defaults to 14 if the user doesn't specify.`;
 
+type DynamicGroupBy = 'assignee' | 'status' | 'component' | 'issuetype' | 'none';
+
+type DynamicFilterSpec = {
+  project: string;
+  days?: number;
+  updatedFromJql?: string; // e.g. startOfYear() or "2026-01-01"
+  jql: string;
+  groupBy: DynamicGroupBy;
+  topN: number;
+  title: string;
+};
+
+let lastDynamicSpec: DynamicFilterSpec | undefined;
+
+type ReportAudience = 'delivery_manager' | 'business_analyst' | 'project_manager' | 'sprint_review';
+type ReportTone = 'executive' | 'detailed';
+type ReportSection = 'exec_summary' | 'delivery' | 'scope' | 'risks' | 'quality' | 'people' | 'charts' | 'raw';
+type ReportChart =
+  | 'status_pie'
+  | 'assignee_bar'
+  | 'component_bar'
+  | 'issuetype_bar'
+  | 'aging_bar'
+  | 'done_vs_notdone';
+
+type ReportSpec = {
+  audience: ReportAudience;
+  tone: ReportTone;
+  sections: ReportSection[];
+  charts: ReportChart[];
+  groupBy: DynamicGroupBy;
+  topN: number;
+  thresholds: { staleDays: number; agingDays: number };
+  title?: string;
+};
+
+let lastReportSpec: ReportSpec | undefined;
+
+type ExtractCache = {
+  jql: string;
+  total: number;
+  fetchedAt: number;
+  issues: any[];
+};
+
+let lastExtractCache: ExtractCache | undefined;
+let pendingLargeFetch: { spec: DynamicFilterSpec; reportSpec: ReportSpec; total: number } | undefined;
+
+function escapeJqlString(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function normalizeGroupBy(v: any): DynamicGroupBy {
+  const s = String(v ?? '').toLowerCase();
+  if (s === 'assignee' || s === 'status' || s === 'component' || s === 'issuetype' || s === 'none') return s;
+  return 'assignee';
+}
+
+function normalizeAudience(v: any): ReportAudience {
+  const s = String(v ?? '').toLowerCase().replace(/\s+/g, '_');
+  if (s === 'delivery_manager' || s === 'business_analyst' || s === 'project_manager' || s === 'sprint_review') return s;
+  if (s.includes('delivery')) return 'delivery_manager';
+  if (s.includes('business')) return 'business_analyst';
+  if (s.includes('project') || s.includes('chef')) return 'project_manager';
+  if (s.includes('sprint') || s.includes('review')) return 'sprint_review';
+  return 'delivery_manager';
+}
+
+function normalizeTone(v: any): ReportTone {
+  const s = String(v ?? '').toLowerCase();
+  return s === 'detailed' ? 'detailed' : 'executive';
+}
+
+function uniq<T>(xs: T[]): T[] {
+  return [...new Set(xs)];
+}
+
+function uniqSections(xs: ReportSection[]): ReportSection[] {
+  return uniq(xs) as ReportSection[];
+}
+
+function clampInt(n: any, min: number, max: number, fallback: number): number {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(v)));
+}
+
+function defaultReportSpec(audience: ReportAudience): ReportSpec {
+  if (audience === 'sprint_review') {
+    return {
+      audience,
+      tone: 'executive',
+      sections: ['exec_summary', 'delivery', 'scope', 'risks', 'charts'],
+      charts: ['done_vs_notdone', 'status_pie', 'component_bar', 'assignee_bar', 'aging_bar'],
+      groupBy: 'component',
+      topN: 10,
+      thresholds: { staleDays: 5, agingDays: 7 }
+    };
+  }
+  if (audience === 'business_analyst') {
+    return {
+      audience,
+      tone: 'executive',
+      sections: ['exec_summary', 'delivery', 'scope', 'charts', 'raw'],
+      charts: ['done_vs_notdone', 'status_pie', 'component_bar', 'issuetype_bar'],
+      groupBy: 'issuetype',
+      topN: 10,
+      thresholds: { staleDays: 7, agingDays: 10 }
+    };
+  }
+  if (audience === 'project_manager') {
+    return {
+      audience,
+      tone: 'executive',
+      sections: ['exec_summary', 'delivery', 'risks', 'quality', 'charts'],
+      charts: ['done_vs_notdone', 'status_pie', 'assignee_bar', 'component_bar', 'aging_bar'],
+      groupBy: 'assignee',
+      topN: 10,
+      thresholds: { staleDays: 5, agingDays: 7 }
+    };
+  }
+  return {
+    audience: 'delivery_manager',
+    tone: 'executive',
+    sections: ['exec_summary', 'delivery', 'risks', 'quality', 'people', 'charts'],
+    charts: ['done_vs_notdone', 'status_pie', 'assignee_bar', 'component_bar', 'aging_bar'],
+    groupBy: 'assignee',
+    topN: 10,
+    thresholds: { staleDays: 5, agingDays: 7 }
+  };
+}
+
+function normalizeSections(v: any, fallback: ReportSection[]): ReportSection[] {
+  const allowed: ReportSection[] = ['exec_summary', 'delivery', 'scope', 'risks', 'quality', 'people', 'charts', 'raw'];
+  const arr = Array.isArray(v) ? v : [];
+  const out = arr
+    .map(x => String(x ?? '').toLowerCase())
+    .filter(x => allowed.includes(x as any)) as ReportSection[];
+  return out.length ? uniq(out) : fallback;
+}
+
+function normalizeCharts(v: any, fallback: ReportChart[]): ReportChart[] {
+  const allowed: ReportChart[] = ['status_pie', 'assignee_bar', 'component_bar', 'issuetype_bar', 'aging_bar', 'done_vs_notdone'];
+  const arr = Array.isArray(v) ? v : [];
+  const out = arr
+    .map(x => String(x ?? '').toLowerCase())
+    .filter(x => allowed.includes(x as any)) as ReportChart[];
+  return out.length ? uniq(out) : fallback;
+}
+
+function buildDynamicJql(spec: {
+  project: string;
+  days?: number;
+  updatedFromJql?: string;
+  component?: string;
+  assignee?: string;
+  status?: string;
+  issueType?: string;
+  text?: string;
+  epicKey?: string;
+  jql?: string;
+}): string {
+  const parts: string[] = [];
+  const proj = spec.project.toUpperCase();
+  parts.push(`project = ${proj}`);
+
+  if (spec.updatedFromJql && spec.updatedFromJql.trim()) {
+    // Allow Jira functions like startOfYear() or an explicit date string.
+    const v = spec.updatedFromJql.trim();
+    const isFunc = /^[a-zA-Z_]+\(\)\s*$/.test(v);
+    const isQuoted = /^".*"$/.test(v);
+    const rhs = isFunc || isQuoted ? v : `"${escapeJqlString(v)}"`;
+    parts.push(`updated >= ${rhs}`);
+  } else {
+    const d = Math.max(1, Math.min(365, Number(spec.days) || 14));
+    parts.push(`updatedDate >= -${d}d`);
+  }
+
+  if (spec.component) parts.push(`component = "${escapeJqlString(spec.component)}"`);
+  if (spec.assignee) parts.push(`assignee = "${escapeJqlString(spec.assignee)}"`);
+  if (spec.status) parts.push(`status = "${escapeJqlString(spec.status)}"`);
+  if (spec.issueType) parts.push(`issuetype = "${escapeJqlString(spec.issueType)}"`);
+  if (spec.text) parts.push(`text ~ "${escapeJqlString(spec.text)}"`);
+  if (spec.epicKey) {
+    const k = spec.epicKey.toUpperCase();
+    // Jira instances differ: some use "Epic Link", others use parentEpic.
+    parts.push(`("Epic Link" = ${k} OR parentEpic = ${k})`);
+  }
+
+  const extra = (spec.jql ?? '').trim();
+  const base = parts.join(' AND ');
+  const combined = extra ? `(${base}) AND (${extra})` : base;
+  return `${combined} ORDER BY updated DESC`;
+}
+
+async function buildDynamicFilterSpec(project: string, query: string, days: number): Promise<DynamicFilterSpec> {
+  const system = [
+    'You convert a natural-language analytics request into a Jira filter specification.',
+    'Return ONLY valid JSON. No markdown.',
+    '',
+    'Schema:',
+    '{',
+    '  "days": 14,',
+    '  "updatedFromJql": "",',
+    '  "component": "",',
+    '  "assignee": "",',
+    '  "status": "",',
+    '  "issueType": "",',
+    '  "epicKey": "",',
+    '  "text": "",',
+    '  "extraJql": "",',
+    '  "groupBy": "assignee",',
+    '  "topN": 10,',
+    '  "title": ""',
+    '}',
+    '',
+    'Rules:',
+    '- Prefer simple fields (component/assignee/status/issueType/text) over raw JQL.',
+    '- Use epicKey when user asks for an Epic filter (e.g. "under epic EQC-123").',
+    '- If user says "since start of year"/"depuis le début de l\'année", set updatedFromJql to startOfYear().',
+    '- extraJql should avoid repeating project constraints; time constraints are OK if needed.',
+    '- groupBy must be one of: assignee, status, component, issuetype, none.',
+    '- If the user asks for "top performers", use groupBy=assignee.',
+    '- If the user asks for "distribution by status", use groupBy=status.',
+    '- Keep title short.'
+  ].join('\n');
+
+  const user = [
+    `Project: ${project}`,
+    `Default days: ${days}`,
+    `User request: ${query}`
+  ].join('\n');
+
+  const parsed = await askLmJson(system, user);
+  const d = Math.max(1, Math.min(365, Number(parsed?.days ?? days) || days || 14));
+  const groupBy = normalizeGroupBy(parsed?.groupBy);
+  const topN = Math.max(3, Math.min(25, Number(parsed?.topN ?? 10) || 10));
+  const title = String(parsed?.title ?? '').trim() || `${project} — analyse dynamique`;
+
+  const epicKeyRaw = String(parsed?.epicKey ?? '').trim();
+  const epicKey = epicKeyRaw && /[A-Z][A-Z0-9]+-\d+/.test(epicKeyRaw) ? epicKeyRaw.toUpperCase() : undefined;
+  const updatedFromJql = String(parsed?.updatedFromJql ?? '').trim() || undefined;
+
+  const jql = buildDynamicJql({
+    project,
+    days: d,
+    updatedFromJql,
+    component: (parsed?.component ?? '').toString().trim() || undefined,
+    assignee: (parsed?.assignee ?? '').toString().trim() || undefined,
+    status: (parsed?.status ?? '').toString().trim() || undefined,
+    issueType: (parsed?.issueType ?? '').toString().trim() || undefined,
+    epicKey,
+    text: (parsed?.text ?? '').toString().trim() || undefined,
+    jql: (parsed?.extraJql ?? '').toString().trim() || undefined
+  });
+
+  return { project: project.toUpperCase(), days: d, updatedFromJql, jql, groupBy, topN, title };
+}
+
+async function buildReportSpec(
+  query: string,
+  defaults: { audience: ReportAudience; groupBy: DynamicGroupBy; topN: number }
+): Promise<ReportSpec> {
+  const system = [
+    'You generate a report specification for a Jira analytics dashboard.',
+    'Audience: delivery manager / project manager / business analyst / sprint review.',
+    'Return ONLY valid JSON. No markdown.',
+    '',
+    'Schema:',
+    '{',
+    '  "audience": "delivery_manager",',
+    '  "tone": "executive",',
+    '  "sections": ["exec_summary","delivery","risks","quality","people","charts"],',
+    '  "charts": ["done_vs_notdone","status_pie","assignee_bar","component_bar","aging_bar"],',
+    '  "groupBy": "assignee",',
+    '  "topN": 10,',
+    '  "thresholds": { "staleDays": 5, "agingDays": 7 },',
+    '  "title": ""',
+    '}',
+    '',
+    'Rules:',
+    '- If user does not specify an audience, keep audience=delivery_manager.',
+    '- Always include sections exec_summary and charts for delivery_manager.',
+    '- Prefer executive tone unless the user asks for details.',
+    '- For sprint review, include scope + delivery sections.',
+    '- Thresholds must be reasonable: staleDays 3-14, agingDays 5-21.'
+  ].join('\n');
+
+  const user = [
+    `User request: ${query}`,
+    `Default audience: ${defaults.audience}`,
+    `Default groupBy: ${defaults.groupBy}`,
+    `Default topN: ${defaults.topN}`
+  ].join('\n');
+
+  const parsed = await askLmJson(system, user);
+  const audience = normalizeAudience(parsed?.audience ?? defaults.audience);
+  const preset = defaultReportSpec(audience);
+
+  const tone = normalizeTone(parsed?.tone ?? preset.tone);
+  const groupBy = normalizeGroupBy(parsed?.groupBy ?? defaults.groupBy ?? preset.groupBy);
+  const topN = clampInt(parsed?.topN ?? defaults.topN ?? preset.topN, 3, 25, preset.topN);
+  const thresholds = {
+    staleDays: clampInt(parsed?.thresholds?.staleDays ?? preset.thresholds.staleDays, 3, 14, preset.thresholds.staleDays),
+    agingDays: clampInt(parsed?.thresholds?.agingDays ?? preset.thresholds.agingDays, 5, 21, preset.thresholds.agingDays)
+  };
+  const sections = normalizeSections(parsed?.sections, preset.sections);
+  const charts = normalizeCharts(parsed?.charts, preset.charts);
+  const title = String(parsed?.title ?? '').trim() || undefined;
+
+  const ensuredSections =
+    audience === 'delivery_manager'
+      ? uniqSections(['exec_summary', ...sections, 'charts'])
+      : sections;
+
+  return { audience, tone, sections: ensuredSections, charts, groupBy, topN, thresholds, title };
+}
+
 function classifyIntentHeuristic(userText: string): ClassifiedIntent {
   const text = userText.trim();
   const issueKey = text.match(JIRA_KEY_RE)?.[0];
@@ -198,7 +525,6 @@ function classifyIntentHeuristic(userText: string): ClassifiedIntent {
     return { intent: 'READ_ISSUE', params: { issueKey } };
   }
 
-  const lower = text.toLowerCase();
   const project = (text.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1]; // best-effort
 
   const looksLikeExport =
@@ -208,7 +534,10 @@ function classifyIntentHeuristic(userText: string): ClassifiedIntent {
     /\bcomponent\b/i.test(text);
 
   const looksLikeAnalyze =
-    /\b(analy(s|z)e|metrics|report|throughput|velocity|backlog|stability)\b/i.test(text);
+    /\b(analy(s|z)e|analyse|metrics|report|throughput|velocity|v[ée]locit[ée]|backlog|stability)\b/i.test(text);
+
+  const looksLikeDynamicAnalyze =
+    looksLikeAnalyze && /\b(component|assignee|status|issuetype|type|filter|top|performer|distribution|breakdown|group|epic|pod|depuis|d[ée]but|ann[ée]e)\b/i.test(text);
 
   if (looksLikeExport && project) {
     // If component filter is present, build a minimal safe JQL from it.
@@ -223,6 +552,9 @@ function classifyIntentHeuristic(userText: string): ClassifiedIntent {
   if (looksLikeAnalyze && project) {
     const daysMatch = text.match(/\b(\d+)\s*(day|days|d)\b/i);
     const days = daysMatch ? Number(daysMatch[1]) : 14;
+    if (looksLikeDynamicAnalyze) {
+      return { intent: 'ANALYZE_DYNAMIC', params: { project, days, query: text, refine: false } };
+    }
     return { intent: 'ANALYZE_PROJECT', params: { project, days } };
   }
 
@@ -530,6 +862,328 @@ async function handleAnalyzeProject(
 }
 
 // ============================================================
+// MODE: ANALYZE_DYNAMIC
+// ============================================================
+
+function topCounts(items: string[], topN: number): Array<{ name: string; count: number }> {
+  const m = new Map<string, number>();
+  for (const raw of items) {
+    const k = (raw ?? '').toString().trim() || 'Unknown';
+    m.set(k, (m.get(k) ?? 0) + 1);
+  }
+  return [...m.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([name, count]) => ({ name, count }));
+}
+
+function mermaidPie(title: string, rows: Array<{ name: string; count: number }>): string {
+  const safeTitle = title.replace(/"/g, "'");
+  const lines = rows.map(r => `  "${r.name.replace(/"/g, "'")}" : ${r.count}`);
+  return ['```mermaid', `pie title ${safeTitle}`, ...lines, '```', ''].join('\n');
+}
+
+function mermaidBar(title: string, rows: Array<{ name: string; count: number }>): string {
+  const labels = rows.map(r => r.name.replace(/\s+/g, ' ').trim());
+  const values = rows.map(r => r.count);
+  const safeTitle = title.replace(/"/g, "'");
+  return [
+    '```mermaid',
+    'xychart-beta',
+    `  title "${safeTitle}"`,
+    '  x-axis [' + labels.map(l => `"${l.replace(/"/g, "'")}"`).join(', ') + ']',
+    '  y-axis "Count" 0 --> ' + Math.max(1, ...values),
+    '  bar [' + values.join(', ') + ']',
+    '```',
+    ''
+  ].join('\n');
+}
+
+function daysBetween(fromIso: string, toMs: number): number {
+  const t = new Date(fromIso).getTime();
+  if (!Number.isFinite(t)) return 0;
+  return Math.max(0, Math.round((toMs - t) / (24 * 60 * 60 * 1000)));
+}
+
+function isDoneStatus(status: string): boolean {
+  const s = String(status ?? '').toLowerCase();
+  return s === 'done' || s === 'closed';
+}
+
+function mermaidDoneVsNotDone(project: string, done: number, notDone: number): string {
+  return [
+    '```mermaid',
+    'xychart-beta',
+    `  title "${project.replace(/"/g, "'")} — Done vs Not Done"`,
+    '  x-axis ["Done","Not Done"]',
+    '  y-axis "Count" 0 --> ' + Math.max(1, done, notDone),
+    `  bar [${done}, ${notDone}]`,
+    '```',
+    ''
+  ].join('\n');
+}
+
+function mermaidAgingHistogram(project: string, buckets: Array<{ label: string; count: number }>): string {
+  const labels = buckets.map(b => b.label);
+  const values = buckets.map(b => b.count);
+  return [
+    '```mermaid',
+    'xychart-beta',
+    `  title "${project.replace(/"/g, "'")} — WIP aging (days since update)"`,
+    '  x-axis [' + labels.map(l => `"${l.replace(/"/g, "'")}"`).join(', ') + ']',
+    '  y-axis "Count" 0 --> ' + Math.max(1, ...values),
+    '  bar [' + values.join(', ') + ']',
+    '```',
+    ''
+  ].join('\n');
+}
+
+function computeVelocityFromIssues(issues: any[]): { completedCount: number; totalStoryPoints: number } {
+  const completed = issues.filter((i: any) => {
+    return isDoneStatus(String(i?.status ?? ''));
+  });
+  const totalSP = completed.reduce((sum: number, i: any) => sum + (Number(i?.storyPoints ?? 0) || 0), 0);
+  return { completedCount: completed.length, totalStoryPoints: totalSP };
+}
+
+async function handleAnalyzeDynamic(
+  params: Record<string, any>,
+  stream: any
+): Promise<void> {
+  const project = String(params.project ?? '').trim();
+  const days = Number(params.days ?? 14) || 14;
+  const query = String(params.query ?? '').trim();
+  const refine = !!params.refine;
+  const confirm = !!params.confirm;
+
+  if (!project) { stream.markdown('Provide a project key (e.g., EQC).'); return; }
+
+  const baseQuery = query || `Analyze ${project} dynamically over last ${days} days`;
+  let reportSpec: ReportSpec;
+  try {
+    reportSpec = await buildReportSpec(baseQuery, { audience: 'delivery_manager', groupBy: 'assignee', topN: 10 });
+  } catch {
+    reportSpec = defaultReportSpec('delivery_manager');
+  }
+
+  streamPlan(stream, [
+    `Build a dynamic filter for **${project.toUpperCase()}** (audience: **${reportSpec.audience}**)`,
+    'Fetch matching issues from Jira',
+    'Generate an executive-friendly report + dashboards'
+  ]);
+
+  let spec: DynamicFilterSpec;
+  try {
+    const base = await buildDynamicFilterSpec(project, baseQuery, days);
+    if (refine && lastDynamicSpec && lastDynamicSpec.project === project.toUpperCase()) {
+      // Simple refine strategy: keep previous JQL and add the new constraints
+      spec = { ...base, jql: `(${lastDynamicSpec.jql.replace(/\s+ORDER BY updated DESC\s*$/i, '')}) AND (${base.jql.replace(/\s+ORDER BY updated DESC\s*$/i, '')}) ORDER BY updated DESC` };
+    } else {
+      spec = base;
+    }
+  } catch (e: any) {
+    stream.markdown(`Filter generation failed, falling back to a basic query.\n\n`);
+    spec = {
+      project: project.toUpperCase(),
+      days,
+      jql: buildDynamicJql({ project, days }),
+      groupBy: reportSpec.groupBy,
+      topN: reportSpec.topN,
+      title: `${project.toUpperCase()} — analyse dynamique`
+    };
+  }
+
+  lastDynamicSpec = spec;
+  lastReportSpec = reportSpec;
+
+  const title = reportSpec.title || spec.title;
+  stream.markdown(`## ${title}\n\n`);
+  stream.markdown(`**JQL:** \`${spec.jql}\`\n\n`);
+
+  const jira = new JiraClient(cfg());
+
+  // Large-volume guardrail: count first, then ask confirmation before downloading everything.
+  const total = await jira.countIssues(spec.jql);
+  stream.markdown(`**${total}** issue(s) matched.\n\n`);
+  if (!total) return;
+
+  const LARGE_THRESHOLD = Math.max(0, Number(cfg().get<number>('analyze.largeThreshold', 2000)) || 2000);
+  if (total > LARGE_THRESHOLD && !confirm) {
+    pendingLargeFetch = { spec, reportSpec, total };
+    stream.markdown(
+      `This query matches **${total}** issues. Fetching them all may take time.\n\n` +
+      `To continue, rerun with confirmation:\n` +
+      `- \`@sg analyze-dynamic confirm\`\n\n` +
+      `Or refine the scope:\n` +
+      `- \`@sg analyze-dynamic refine only last 14 days\`\n` +
+      `- \`@sg analyze-dynamic refine component = RustRunner\`\n`
+    );
+    return;
+  }
+
+  // If user confirms without restating the query, reuse the pending large fetch.
+  if (confirm && pendingLargeFetch && !query) {
+    spec = pendingLargeFetch.spec;
+    reportSpec = pendingLargeFetch.reportSpec;
+  }
+
+  // Cache reuse: if same JQL recently fetched, reuse it.
+  const CACHE_TTL_MS = 5 * 60 * 1000;
+  const fetchNow = Date.now();
+  let issues: any[];
+  if (lastExtractCache && lastExtractCache.jql === spec.jql && (fetchNow - lastExtractCache.fetchedAt) < CACHE_TTL_MS) {
+    issues = lastExtractCache.issues;
+    stream.markdown(`Reusing cached extraction (**${issues.length}** issues).\n\n`);
+  } else {
+    stream.markdown('Fetching data from Jira…\n\n');
+    const paged = await jira.searchIssuesPaged(spec.jql, null); // fetch ALL pages
+    issues = paged.issues;
+    lastExtractCache = { jql: spec.jql, total: paged.total, fetchedAt: fetchNow, issues };
+    stream.markdown(`Fetched **${issues.length}** issue(s).\n\n`);
+  }
+
+  const velocity = computeVelocityFromIssues(issues);
+
+  // Core distributions (always useful)
+  const topN = reportSpec.topN;
+  const byStatus = topCounts(issues.map(i => i.status), Math.min(topN, 12));
+  const byAssignee = topCounts(issues.map(i => i.assignee), topN);
+  const byIssueType = topCounts(issues.map(i => i.issueType), Math.min(topN, 12));
+  const byComponent = topCounts(
+    issues.flatMap(i => (Array.isArray(i.components) && i.components.length ? i.components : ['(none)'])),
+    Math.min(topN, 12)
+  );
+
+  // Derivations for DM: WIP aging, stale, blocked-ish
+  const now = Date.now();
+  const notDone = issues.filter(i => !isDoneStatus(i.status));
+  const done = issues.length - notDone.length;
+  const notDoneCount = notDone.length;
+
+  const stale = notDone
+    .map(i => ({ i, days: daysBetween(i.updated, now) }))
+    .filter(x => x.days >= reportSpec.thresholds.staleDays)
+    .sort((a, b) => b.days - a.days)
+    .slice(0, 15);
+
+  const blockedLike = notDone
+    .filter(i => /blocked|on hold|imped/i.test(String(i.status ?? '').toLowerCase()))
+    .slice(0, 15);
+
+  const agingBuckets = [
+    { label: '0-2', min: 0, max: 2 },
+    { label: '3-5', min: 3, max: 5 },
+    { label: '6-10', min: 6, max: 10 },
+    { label: '11+', min: 11, max: 10_000 }
+  ].map(b => ({
+    label: b.label,
+    count: notDone.filter(i => {
+      const d = daysBetween(i.updated, now);
+      return d >= b.min && d <= b.max;
+    }).length
+  }));
+
+  // Sections (user-friendly)
+  if (reportSpec.sections.includes('exec_summary')) {
+    stream.markdown('### Executive summary\n\n');
+    stream.markdown(`- Audience: **${reportSpec.audience}** · Tone: **${reportSpec.tone}**\n`);
+    stream.markdown(`- Scope: **${issues.length}** issues · Done: **${done}** · WIP: **${notDoneCount}**\n`);
+    stream.markdown(`- Velocity (scope filtré): **${velocity.completedCount}** done · **${velocity.totalStoryPoints}** SP\n`);
+    stream.markdown(`- Risque “stale” (≥ ${reportSpec.thresholds.staleDays}j sans update): **${stale.length}**\n\n`);
+  }
+
+  if (reportSpec.sections.includes('delivery')) {
+    stream.markdown('### Delivery\n\n');
+    const topDone = issues
+      .filter(i => isDoneStatus(i.status))
+      .slice(0, 10);
+    if (!topDone.length) {
+      stream.markdown('_No Done/Closed issues in this filtered scope._\n\n');
+    } else {
+      stream.markdown('Top delivered (sample):\n');
+      for (const i of topDone) stream.markdown(`- **${i.key}** (${i.issueType}, ${i.storyPoints} SP): ${i.summary}\n`);
+      stream.markdown('\n');
+    }
+  }
+
+  if (reportSpec.sections.includes('risks')) {
+    stream.markdown('### Risks & blockers\n\n');
+    if (!stale.length && !blockedLike.length) {
+      stream.markdown('_No major risks detected with current thresholds._\n\n');
+    } else {
+      if (stale.length) {
+        stream.markdown(`**Stale (no update ≥ ${reportSpec.thresholds.staleDays} days):**\n`);
+        for (const s of stale) stream.markdown(`- **${s.i.key}** (${s.i.status}, ${s.days}d): ${s.i.summary}\n`);
+        stream.markdown('\n');
+      }
+      if (blockedLike.length) {
+        stream.markdown('**Blocked / On-hold (status heuristic):**\n');
+        for (const b of blockedLike) stream.markdown(`- **${b.key}** (${b.status}): ${b.summary}\n`);
+        stream.markdown('\n');
+      }
+    }
+  }
+
+  if (reportSpec.sections.includes('quality')) {
+    stream.markdown('### Quality\n\n');
+    const reopenedLike = issues.filter(i => String(i.status ?? '').toLowerCase().includes('reopen'));
+    const reopenRate = done + reopenedLike.length > 0 ? Math.round((reopenedLike.length / (done + reopenedLike.length)) * 100) : 0;
+    stream.markdown(`- Reopen-like count: **${reopenedLike.length}** (rate: **${reopenRate}%**)\n`);
+    stream.markdown(`- Issue types top: **${byIssueType.slice(0, 3).map(x => `${x.name} (${x.count})`).join(', ') || 'n/a'}**\n\n`);
+  }
+
+  if (reportSpec.sections.includes('people')) {
+    stream.markdown('### People / load\n\n');
+    stream.markdown(`Top assignees: ${byAssignee.slice(0, 5).map(x => `**${x.name}** (${x.count})`).join(' · ') || '_n/a_'}\n\n`);
+  }
+
+  if (reportSpec.sections.includes('charts')) {
+    stream.markdown('### Dashboards\n\n');
+    const proj = spec.project;
+    for (const c of reportSpec.charts) {
+      if (c === 'done_vs_notdone') stream.markdown(mermaidDoneVsNotDone(proj, done, notDoneCount));
+      if (c === 'status_pie') stream.markdown(mermaidPie(`${proj} — Status distribution`, byStatus));
+      if (c === 'assignee_bar') stream.markdown(mermaidBar(`${proj} — Top assignees`, byAssignee.slice(0, 10)));
+      if (c === 'component_bar') stream.markdown(mermaidBar(`${proj} — Top components`, byComponent.slice(0, 10)));
+      if (c === 'issuetype_bar') stream.markdown(mermaidBar(`${proj} — Issue types`, byIssueType.slice(0, 10)));
+      if (c === 'aging_bar') stream.markdown(mermaidAgingHistogram(proj, agingBuckets));
+    }
+  }
+
+  if (reportSpec.sections.includes('raw')) {
+    stream.markdown('### Détails (sample)\n\n');
+    stream.markdown(`| Key | Summary | Type | Status | Assignee | Components | SP | Updated |\n`);
+    stream.markdown(`|-----|---------|------|--------|----------|------------|----|---------|\n`);
+    for (const i of issues.slice(0, 25)) {
+      const comps = (Array.isArray(i.components) ? i.components.join(', ') : '');
+      stream.markdown(`| ${i.key} | ${i.summary} | ${i.issueType} | ${i.status} | ${i.assignee} | ${comps} | ${i.storyPoints} | ${i.updated.slice(0, 10)} |\n`);
+    }
+    stream.markdown('\n');
+  }
+
+  stream.markdown('\n### AI insights\n\n');
+  const prompt = JSON.stringify({
+    spec,
+    reportSpec,
+    totals: { issues: issues.length },
+    velocity,
+    byStatus,
+    byAssignee,
+    byComponent,
+    byIssueType,
+    risks: {
+      staleCount: stale.length,
+      blockedLikeCount: blockedLike.length
+    }
+  });
+  const insights = await askLm(
+    'You are a senior delivery manager coach. Given the dashboard JSON, produce: (1) 3 insights, (2) 3 risks, (3) 3 next actions. Be concise and suitable for a sprint review.',
+    prompt
+  );
+  stream.markdown(insights + '\n');
+}
+
+// ============================================================
 // MODE: EXTRACT_DATA
 // ============================================================
 
@@ -589,6 +1243,7 @@ async function routeIntent(
     case 'CREATE_ISSUE':     return handleCreateIssue(classified.params, stream);
     case 'IMPLEMENT':        return handleImplement(classified.params, stream);
     case 'ANALYZE_PROJECT':  return handleAnalyzeProject(classified.params, stream);
+    case 'ANALYZE_DYNAMIC':  return handleAnalyzeDynamic(classified.params, stream);
     case 'EXTRACT_DATA':     return handleExtractData(classified.params, stream);
     case 'PUSH':             return handlePush(classified.params, stream);
     default:
@@ -674,6 +1329,18 @@ export function activate(context: vscode.ExtensionContext) {
           } else if (cmd === 'create' || cmd === 'analyze' || cmd === 'extract') {
             // Let LM classify for full param extraction
             classified = await classifyIntent(prompt);
+          } else if (cmd === 'analyze-dynamic') {
+            // Force dynamic analyze mode, let LM extract filters from the remaining prompt
+            const p = prompt.replace(/^\s*analyze-dynamic\s+/i, '').trim();
+            const confirm = /^\s*(confirm|ok|oui|go)\b/i.test(p);
+            const withoutConfirm = p.replace(/^\s*(confirm|ok|oui|go)\b[:\s-]*/i, '').trim();
+            const proj = (p.match(/\b([A-Z][A-Z0-9]{1,9})\b/) ?? [])[1] ?? '';
+            const daysMatch = p.match(/\b(\d+)\s*(day|days|d)\b/i);
+            const days = daysMatch ? Number(daysMatch[1]) : 14;
+            const refine = /^\s*(refine|affine|ajuste|ajuster|raffine|raffiner)\b/i.test(p);
+            const cleaned = p.replace(/^\s*(refine|affine|ajuste|ajuster|raffine|raffiner)\b[:\s-]*/i, '').trim();
+            const q = confirm ? withoutConfirm : (cleaned || p);
+            classified = { intent: 'ANALYZE_DYNAMIC', params: { project: proj, days, query: q, refine, confirm } };
           } else {
             // NLU classification via LM
             stream.markdown('_Analyzing your request…_\n\n');
