@@ -6,8 +6,7 @@ import {
   GitHubClient,
   GitService,
   JiraClient,
-  ProjectMetrics,
-  requireSetting
+  ProjectMetrics
 } from './services';
 
 // ============================================================
@@ -35,35 +34,76 @@ async function pickModel(): Promise<any> {
   }
   const models = await lm.selectChatModels({ vendor: 'copilot' });
   if (models?.length) return models[0];
-  const any = await lm.selectChatModels({});
-  if (!any?.length) throw new Error('No chat model available via vscode.lm.');
-  return any[0];
+  const fallback = await lm.selectChatModels({});
+  if (!fallback?.length) throw new Error('No chat model available via vscode.lm.');
+  return fallback[0];
 }
 
-function lmMessage(role: 'system' | 'user', content: string): any {
-  const ctor = (vscode as any).LanguageModelChatMessage;
-  if (ctor?.from) return ctor.from(role, content);
-  return { role, content };
+/** Create a LanguageModelChatMessage — handles multiple API shapes. */
+function userMessage(content: string): any {
+  const Msg = (vscode as any).LanguageModelChatMessage;
+  if (Msg) {
+    // VS Code 1.93+: static User() method
+    if (typeof Msg.User === 'function') return Msg.User(content);
+    // Older API: .from(role, content)
+    if (typeof Msg.from === 'function') return Msg.from('user', content);
+    // Constructor: new LanguageModelChatMessage(role, content)
+    const Role = (vscode as any).LanguageModelChatMessageRole;
+    if (Role) return new Msg(Role.User, content);
+  }
+  return { role: 'user', content };
 }
 
+/**
+ * Collect the full text from a LanguageModelChatResponse.
+ * In the current API, resp.text is an AsyncIterable<string>, NOT a plain string.
+ */
 async function collectText(resp: any): Promise<string> {
   if (!resp) return '';
-  if (typeof resp.text === 'string') return resp.text;
-  if (resp.stream && Symbol.asyncIterator in resp.stream) {
+
+  // Current API (1.90+): resp.text is AsyncIterable<string>
+  const t = resp.text;
+  if (t && typeof t !== 'string' && typeof t[Symbol.asyncIterator] === 'function') {
     let out = '';
-    for await (const c of resp.stream) out += c?.text ?? '';
+    for await (const chunk of t) {
+      out += typeof chunk === 'string' ? chunk : String(chunk);
+    }
     return out;
   }
-  return String(resp);
+
+  // Older API: resp.text is a plain string
+  if (typeof t === 'string') return t;
+
+  // Fallback: resp.stream (some early versions)
+  if (resp.stream && typeof resp.stream[Symbol.asyncIterator] === 'function') {
+    let out = '';
+    for await (const part of resp.stream) {
+      if (typeof part === 'string') out += part;
+      else out += part?.value ?? part?.text ?? '';
+    }
+    return out;
+  }
+
+  return '';
 }
 
-/** Send a system + user prompt to the LM and get a text response. */
+/** Send system + user prompt to the LM and collect the full text response. */
 async function askLm(system: string, user: string): Promise<string> {
   const model = await pickModel();
-  const messages = [lmMessage('system', system), lmMessage('user', user)];
-  const token = new (vscode as any).CancellationTokenSource().token;
-  const resp = await model.sendRequest(messages, {}, token);
-  return typeof resp?.text === 'string' ? resp.text : await collectText(resp);
+  const messages = [userMessage(user)];
+  const cancellation = new (vscode as any).CancellationTokenSource();
+
+  let resp: any;
+  try {
+    // Preferred: pass system prompt via options (1.93+)
+    resp = await model.sendRequest(messages, { systemPrompt: system }, cancellation.token);
+  } catch {
+    // Fallback: embed system prompt into the user message
+    const combined = system + '\n\n---\n\nUser message:\n' + user;
+    resp = await model.sendRequest([userMessage(combined)], {}, cancellation.token);
+  }
+
+  return await collectText(resp);
 }
 
 /** Ask the LM and parse the first JSON object found in its response. */
@@ -72,9 +112,13 @@ async function askLmJson(system: string, user: string): Promise<any> {
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
   if (start < 0 || end < 0) {
-    throw new Error(`LM did not return valid JSON. Response: ${raw.slice(0, 300)}`);
+    throw new Error(`LM did not return valid JSON. Raw response:\n${raw.slice(0, 500)}`);
   }
-  return JSON.parse(raw.slice(start, end + 1));
+  try {
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch (e: any) {
+    throw new Error(`LM returned malformed JSON: ${e?.message}. Raw:\n${raw.slice(0, 500)}`);
+  }
 }
 
 // ============================================================
