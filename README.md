@@ -1,18 +1,18 @@
-# SGA — Intelligent Jira / Copilot / GitHub Agent
+# SGUnifyAI — Jira / Copilot / GitHub
 
-VS Code extension that understands natural language to orchestrate Jira, GitHub Enterprise, and your local workspace.
+VS Code extension that understands natural language to orchestrate Jira (Bearer), GitHub Enterprise, and your local workspace.
 
 ## Modes
 
 | Mode | What it does | Example |
 |------|-------------|---------|
-| **READ_ISSUE** | Fetch and explain a Jira ticket | `@sg what is EQC-1012?` |
-| **CREATE_ISSUE** | Create a new Jira ticket | `@sg create a Story on EQC to migrate the API to v2` |
-| **IMPLEMENT** | Generate code, apply edits, commit | `@sg implement EQC-1012, commit but don't push` |
-| **ANALYZE_PROJECT** | Project metrics and AI insights | `@sg analyze EQC over the last 15 days` |
-| **ANALYZE_DYNAMIC** | Dynamic analysis with filters + visual report | `@sg analyze-dynamic EQC last 2 days top performers for component RustRunner` |
-| **EXTRACT_DATA** | Export tickets as Markdown or CSV | `@sg export EQC tickets as CSV` |
-| **PUSH** | Push a committed branch + create PR | `@sg push EQC-1012` |
+| **READ_ISSUE** | Fetch and explain a Jira ticket | `@SGUnifyAI read EXES-1012` |
+| **CREATE_ISSUE** | Create a new Jira ticket | `@SGUnifyAI create a Story on EXES to migrate the API to v2` |
+| **IMPLEMENT** | Generate code, apply edits, commit | `@SGUnifyAI implement EXES-1012` |
+| **ANALYZE_PROJECT** | Project metrics and AI insights | `@SGUnifyAI analyze EXES over the last 15 days` |
+| **ANALYZE_DYNAMIC** | Dynamic analysis + visual report (epics, charts) | `@SGUnifyAI analyze-dynamic EXES last 2 days top performers for epic Infra` |
+| **EXTRACT_DATA** | Export tickets as Markdown or CSV | `@SGUnifyAI export EXES tickets as CSV` |
+| **PUSH** | Push a committed branch + create PR | `@SGUnifyAI push EXES-1012` |
 
 ## Install
 
@@ -34,109 +34,61 @@ npm run package
 
 ## Configuration (settings.json)
 
-Only 4 settings — URL + token for each service:
+Four settings — URL + token for Jira and GitHub. Jira uses **Bearer** only (`Authorization: Bearer <token>`). If the token was pasted with a `Bearer ` prefix, it is stripped automatically.
 
 ```json
 {
-  "sg.jira.url": "https://your-company.atlassian.net",
-  "sg.jira.token": "JIRA_TOKEN_OR_PAT",
-  "sg.jira.authType": "auto",
-  "sg.jira.user": "email@company.com",
-  "sg.github.url": "https://ghe.example.com",
-  "sg.github.token": "GITHUB_PAT"
+  "sgunifyai.jira.url": "https://your-company.atlassian.net",
+  "sgunifyai.jira.token": "JIRA_API_TOKEN_OR_PAT",
+  "sgunifyai.github.url": "https://ghe.example.com",
+  "sgunifyai.github.token": "GITHUB_PAT"
 }
 ```
 
 ### Auth details
 
-- **Jira**:
-  - Supports **Bearer** and **Basic** auth.
-  - `sg.jira.authType` can be `bearer`, `basic`, or `auto`.
-  - In `auto`, Basic is used when `sg.jira.user` is set (or when the token looks like `user:token`), otherwise Bearer.
-  - Adds `Accept: application/json` (helps avoid HTML login pages).
-  - Tries both Jira REST API versions: `/rest/api/2` then `/rest/api/3`.
-- **GitHub Enterprise**: `Authorization: token <token>`. API endpoint: `{sg.github.url}/api/v3`.
+- **Jira**: Bearer token only. `Accept: application/json`. Tries REST `/rest/api/2` then `/rest/api/3`.
+- **GitHub Enterprise**: `Authorization: token <token>`. API: `{sgunifyai.github.url}/api/v3`.
 
 ## Large-result guardrail (ANALYZE_DYNAMIC)
 
-If a dynamic analysis matches a lot of issues, the agent will ask for confirmation before downloading all pages.
+If a dynamic analysis matches more than **2000** issues, the agent asks for confirmation before paginating the full result. (Fixed threshold — no setting.)
 
-You can configure the threshold:
+## Epics vs components
 
-```json
-{
-  "sg.analyze.largeThreshold": 2000
-}
-```
-
-## Story points field
-
-If story points show as `0` for all issues, set your Jira custom field id explicitly:
-
-```json
-{
-  "sg.jira.storyPointsFieldId": "customfield_10016"
-}
-```
+Reports and charts use **epic** linkage (`parent`, Epic Link `customfield_10014` on typical Jira Cloud). There is no Jira “component” filter in the dynamic builder anymore.
 
 ## Monthly HTML report
 
-`ANALYZE_DYNAMIC` writes a **single-file HTML dashboard** under `reports/jira-monthly-report-*.html` in the workspace (Chart.js, dark theme) and tries to open it in the browser.
+`ANALYZE_DYNAMIC` writes **single-file HTML** under `reports/jira-monthly-report-*.html` and tries to open it in the browser.
+
+## Command palette
+
+- **SGUnifyAI: Implement Jira ticket** (`sgunifyai.implement`) — requires an open workspace folder, a Git repo, Jira settings, and Copilot LM for code generation.
 
 ## Debug / Test
 
 1. Open this folder in VS Code.
-2. Press **F5** to launch the Extension Development Host.
+2. Press **F5** (Extension Development Host).
 3. In the dev host, open a workspace with a Git repo and try:
-   - `@sg what is EQC-1012?`
-   - `@sg implement EQC-1012`
-   - `@sg analyze EQC last 15 days`
-   - `@sg analyze-dynamic EQC last 2 days top performers`
-   - `@sg analyze-dynamic EQC distribution by status for component RustRunner`
-   - `@sg push EQC-1012`
+
+   - `@SGUnifyAI read EXES-1012`
+   - `@SGUnifyAI implement EXES-1012`
+   - `@SGUnifyAI analyze EXES last 15 days`
+   - `@SGUnifyAI analyze-dynamic EXES last 2 days top performers`
+   - `@SGUnifyAI analyze-dynamic EXES distribution by status under epic EXES-100`
+   - `@SGUnifyAI push EXES-1012`
 
 ## Architecture
 
 ```
-package.json    — commands, settings, chat participant declaration
-src/extension.ts — "The Brain": intent classification (LM), routing, mode handlers
-src/services.ts  — "The Hands": Jira REST, GitHub REST, Git (vscode.git), analytics engine
+package.json      — commands, settings, chat participant
+src/extension.ts  — intent classification (LM), routing, handlers
+src/services.ts   — Jira REST, GitHub REST, Git (vscode.git), analytics
 ```
-
-## Analytics Metrics (ANALYZE_PROJECT)
-
-- **Velocity**: completed tickets count + story points
-- **Backlog Health**: % of issues with a description
-- **Stability Index**: reopened / (completed + reopened)
-- **Team Flow**: tickets stuck > 5 days without update
-- **AI Insights**: 2 improvement suggestions generated by Copilot
-
-## Dynamic Analytics (ANALYZE_DYNAMIC)
-
-`ANALYZE_DYNAMIC` accepts natural-language filters (and optionally raw JQL fragments) and generates a **visual report**.
-
-Examples:
-
-- `@sg analyze-dynamic EQC last 2 days top performers`
-- `@sg analyze-dynamic EQC distribution by status for component RustRunner`
-- `@sg analyze-dynamic EQC only bugs updated last 7 days group by assignee`
-
-Output includes:
-
-- Mermaid **pie chart** for status distribution
-- Mermaid **bar chart** for top assignees
-- A compact table of the latest updated issues
-
-## Best practices (alignement “marché”)
-
-- **Done / velocity**: l’extension utilise `status.statusCategory.key === done` quand Jira le renvoie, puis des noms de statut courants (Done, Closed, Resolved, etc.) — plus fiable que le seul nom “Done”.
-- **Gros volumes**: seuil configurable `sg.analyze.largeThreshold` + confirmation avant téléchargement paginé; cache 5 min sur le même JQL.
-- **Story points**: si tout est à 0, renseigner `sg.jira.storyPointsFieldId` (id du champ custom Jira).
-- **API Jira**: retry automatique sur réponse **429** (rate limit) avec en-tête `Retry-After` / backoff.
-- **UX**: opérations Jira longues affichent une **notification de progression** (VS Code).
 
 ## Notes
 
-- Git operations use the built-in `vscode.git` extension.
-- Push and PR creation require explicit confirmation (`@sg push KEY`).
-- Tokens are stored in `settings.json` — do not commit them.
+- Git uses the built-in `vscode.git` extension.
+- Push / PR require an explicit `@SGUnifyAI push KEY` (or classified push intent).
+- Do not commit tokens in `settings.json`.

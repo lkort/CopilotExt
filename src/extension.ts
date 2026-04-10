@@ -21,8 +21,11 @@ const JIRA_KEY_RE = /([A-Z][A-Z0-9]+-\d+)/;
 // VS Code configuration shortcut
 // ============================================================
 
+/** Default cap before analyze-dynamic asks for confirmation (no setting — keeps config minimal). */
+const DEFAULT_ANALYZE_LARGE_THRESHOLD = 2000;
+
 function cfg(): vscode.WorkspaceConfiguration {
-  return vscode.workspace.getConfiguration('sg');
+  return vscode.workspace.getConfiguration('sgunifyai');
 }
 
 // ============================================================
@@ -151,7 +154,7 @@ interface ClassifiedIntent {
   params: Record<string, any>;
 }
 
-const CLASSIFY_SYSTEM = `You are an intent classifier for a VS Code agent called @sg.
+const CLASSIFY_SYSTEM = `You are an intent classifier for a VS Code agent called @SGUnifyAI.
 Given the user message, classify it into EXACTLY one intent and extract parameters.
 Return ONLY valid JSON — no markdown, no explanation.
 
@@ -183,9 +186,9 @@ ANALYZE_DYNAMIC — dynamic analysis driven by a natural language filter
 EXTRACT_DATA — list/export tickets
   params: { "project": "PROJ", "jql": "", "format": "markdown" }
   Examples:
-  - "list all issues from EQC where component = RustRunner"
-    => intent=EXTRACT_DATA, params.project="EQC", params.jql="project = EQC AND component = \\"RustRunner\\" ORDER BY updated DESC"
-  - "get all EQC tickets assigned to Alice updated in last 7 days"
+  - "list all issues from EXES for epic Infra"
+    => intent=EXTRACT_DATA, params.project="EXES", params.jql="project = EXES AND (\\"Epic Link\\" = EXES-123 OR parentEpic = EXES-123) ORDER BY updated DESC" when epic key known; else filter by epic name via text or extra JQL
+  - "get all EXES tickets assigned to Alice updated in last 7 days"
     => intent=EXTRACT_DATA with an appropriate JQL filter
 
 PUSH — push an already-committed branch and optionally create a PR
@@ -199,7 +202,7 @@ Rules:
 - Extract project keys and issue keys accurately.
 - days defaults to 14 if the user doesn't specify.`;
 
-type DynamicGroupBy = 'assignee' | 'status' | 'component' | 'issuetype' | 'none';
+type DynamicGroupBy = 'assignee' | 'status' | 'epic' | 'issuetype' | 'none';
 
 type DynamicFilterSpec = {
   project: string;
@@ -219,7 +222,7 @@ type ReportSection = 'exec_summary' | 'delivery' | 'scope' | 'risks' | 'quality'
 type ReportChart =
   | 'status_pie'
   | 'assignee_bar'
-  | 'component_bar'
+  | 'epic_bar'
   | 'issuetype_bar'
   | 'aging_bar'
   | 'done_vs_notdone';
@@ -253,7 +256,8 @@ function escapeJqlString(s: string): string {
 
 function normalizeGroupBy(v: any): DynamicGroupBy {
   const s = String(v ?? '').toLowerCase();
-  if (s === 'assignee' || s === 'status' || s === 'component' || s === 'issuetype' || s === 'none') return s;
+  if (s === 'component') return 'epic';
+  if (s === 'assignee' || s === 'status' || s === 'epic' || s === 'issuetype' || s === 'none') return s;
   return 'assignee';
 }
 
@@ -292,8 +296,8 @@ function defaultReportSpec(audience: ReportAudience): ReportSpec {
       audience,
       tone: 'executive',
       sections: ['exec_summary', 'delivery', 'scope', 'risks', 'charts'],
-      charts: ['done_vs_notdone', 'status_pie', 'component_bar', 'assignee_bar', 'aging_bar'],
-      groupBy: 'component',
+      charts: ['done_vs_notdone', 'status_pie', 'epic_bar', 'assignee_bar', 'aging_bar'],
+      groupBy: 'epic',
       topN: 10,
       thresholds: { staleDays: 5, agingDays: 7 }
     };
@@ -303,7 +307,7 @@ function defaultReportSpec(audience: ReportAudience): ReportSpec {
       audience,
       tone: 'executive',
       sections: ['exec_summary', 'delivery', 'scope', 'charts', 'raw'],
-      charts: ['done_vs_notdone', 'status_pie', 'component_bar', 'issuetype_bar'],
+      charts: ['done_vs_notdone', 'status_pie', 'epic_bar', 'issuetype_bar'],
       groupBy: 'issuetype',
       topN: 10,
       thresholds: { staleDays: 7, agingDays: 10 }
@@ -314,7 +318,7 @@ function defaultReportSpec(audience: ReportAudience): ReportSpec {
       audience,
       tone: 'executive',
       sections: ['exec_summary', 'delivery', 'risks', 'quality', 'charts'],
-      charts: ['done_vs_notdone', 'status_pie', 'assignee_bar', 'component_bar', 'aging_bar'],
+      charts: ['done_vs_notdone', 'status_pie', 'assignee_bar', 'epic_bar', 'aging_bar'],
       groupBy: 'assignee',
       topN: 10,
       thresholds: { staleDays: 5, agingDays: 7 }
@@ -324,7 +328,7 @@ function defaultReportSpec(audience: ReportAudience): ReportSpec {
     audience: 'delivery_manager',
     tone: 'executive',
     sections: ['exec_summary', 'delivery', 'risks', 'quality', 'people', 'charts'],
-    charts: ['done_vs_notdone', 'status_pie', 'assignee_bar', 'component_bar', 'aging_bar'],
+    charts: ['done_vs_notdone', 'status_pie', 'assignee_bar', 'epic_bar', 'aging_bar'],
     groupBy: 'assignee',
     topN: 10,
     thresholds: { staleDays: 5, agingDays: 7 }
@@ -341,10 +345,13 @@ function normalizeSections(v: any, fallback: ReportSection[]): ReportSection[] {
 }
 
 function normalizeCharts(v: any, fallback: ReportChart[]): ReportChart[] {
-  const allowed: ReportChart[] = ['status_pie', 'assignee_bar', 'component_bar', 'issuetype_bar', 'aging_bar', 'done_vs_notdone'];
+  const allowed: ReportChart[] = ['status_pie', 'assignee_bar', 'epic_bar', 'issuetype_bar', 'aging_bar', 'done_vs_notdone'];
   const arr = Array.isArray(v) ? v : [];
   const out = arr
-    .map(x => String(x ?? '').toLowerCase())
+    .map(x => {
+      const s = String(x ?? '').toLowerCase();
+      return s === 'component_bar' ? 'epic_bar' : s;
+    })
     .filter(x => allowed.includes(x as any)) as ReportChart[];
   return out.length ? uniq(out) : fallback;
 }
@@ -353,7 +360,6 @@ function buildDynamicJql(spec: {
   project: string;
   days?: number;
   updatedFromJql?: string;
-  component?: string;
   assignee?: string;
   status?: string;
   issueType?: string;
@@ -377,7 +383,6 @@ function buildDynamicJql(spec: {
     parts.push(`updatedDate >= -${d}d`);
   }
 
-  if (spec.component) parts.push(`component = "${escapeJqlString(spec.component)}"`);
   if (spec.assignee) parts.push(`assignee = "${escapeJqlString(spec.assignee)}"`);
   if (spec.status) parts.push(`status = "${escapeJqlString(spec.status)}"`);
   if (spec.issueType) parts.push(`issuetype = "${escapeJqlString(spec.issueType)}"`);
@@ -403,7 +408,6 @@ async function buildDynamicFilterSpec(project: string, query: string, days: numb
     '{',
     '  "days": 14,',
     '  "updatedFromJql": "",',
-    '  "component": "",',
     '  "assignee": "",',
     '  "status": "",',
     '  "issueType": "",',
@@ -416,11 +420,11 @@ async function buildDynamicFilterSpec(project: string, query: string, days: numb
     '}',
     '',
     'Rules:',
-    '- Prefer simple fields (component/assignee/status/issueType/text) over raw JQL.',
-    '- Use epicKey when user asks for an Epic filter (e.g. "under epic EQC-123").',
+    '- Prefer simple fields (epicKey/assignee/status/issueType/text) over raw JQL.',
+    '- Use epicKey when user asks for an Epic filter (e.g. "under epic EXES-123").',
     '- If user says "since start of year"/"depuis le début de l\'année", set updatedFromJql to startOfYear().',
     '- extraJql should avoid repeating project constraints; time constraints are OK if needed.',
-    '- groupBy must be one of: assignee, status, component, issuetype, none.',
+    '- groupBy must be one of: assignee, status, epic, issuetype, none.',
     '- If the user asks for "top performers", use groupBy=assignee.',
     '- If the user asks for "distribution by status", use groupBy=status.',
     '- Keep title short.'
@@ -446,7 +450,6 @@ async function buildDynamicFilterSpec(project: string, query: string, days: numb
     project,
     days: d,
     updatedFromJql,
-    component: (parsed?.component ?? '').toString().trim() || undefined,
     assignee: (parsed?.assignee ?? '').toString().trim() || undefined,
     status: (parsed?.status ?? '').toString().trim() || undefined,
     issueType: (parsed?.issueType ?? '').toString().trim() || undefined,
@@ -472,7 +475,7 @@ async function buildReportSpec(
     '  "audience": "delivery_manager",',
     '  "tone": "executive",',
     '  "sections": ["exec_summary","delivery","risks","quality","people","charts"],',
-    '  "charts": ["done_vs_notdone","status_pie","assignee_bar","component_bar","aging_bar"],',
+    '  "charts": ["done_vs_notdone","status_pie","assignee_bar","epic_bar","aging_bar"],',
     '  "groupBy": "assignee",',
     '  "topN": 10,',
     '  "thresholds": { "staleDays": 5, "agingDays": 7 },',
@@ -557,6 +560,7 @@ function extractProjectKeyFromText(text: string): string | undefined {
     'LAST',
     'TOP',
     'SG',
+    'SGUNIFYAI',
     'CSV',
     'HTML',
     'JSON',
@@ -597,20 +601,23 @@ function classifyIntentHeuristic(userText: string): ClassifiedIntent {
     /\b(export|extract|list|get all|all (the )?(jiras|jira|issues|tickets))\b/i.test(text) ||
     /\bproject\s*=\s*[A-Z][A-Z0-9]+\b/i.test(text) ||
     /\bjql\b/i.test(text) ||
-    /\bcomponent\b/i.test(text);
+    /\bepic\b/i.test(text);
 
   const looksLikeAnalyze =
     /\b(analy(s|z)e|analyse|metrics|report|throughput|velocity|v[ée]locit[ée]|backlog|stability)\b/i.test(text);
 
   const looksLikeDynamicAnalyze =
-    looksLikeAnalyze && /\b(component|assignee|status|issuetype|type|filter|top|performer|distribution|breakdown|group|epic|pod|depuis|d[ée]but|ann[ée]e)\b/i.test(text);
+    looksLikeAnalyze &&
+    /\b(epic|assignee|status|issuetype|type|filter|top|performer|distribution|breakdown|group|pod|depuis|d[ée]but|ann[ée]e)\b/i.test(
+      text
+    );
 
   if (looksLikeExport && project) {
-    // If component filter is present, build a minimal safe JQL from it.
-    const compMatch = text.match(/\bcomponent\s*=\s*("?)([^"\n]+)\1/i);
-    const component = compMatch?.[2]?.trim();
-    const jql = component
-      ? `project = ${project} AND component = "${component.replace(/"/g, '\\"')}" ORDER BY updated DESC`
+    const underEpic = text.match(/\b(?:under|sous)\s+epic\s+([A-Z][A-Z0-9]+-\d+)\b/i);
+    const epicEq = text.match(/\bepic\s*=\s*([A-Z][A-Z0-9]+-\d+)\b/i);
+    const epicKey = (underEpic?.[1] ?? epicEq?.[1] ?? '').toUpperCase();
+    const jql = epicKey
+      ? `project = ${project} AND ("Epic Link" = ${epicKey} OR parentEpic = ${epicKey}) ORDER BY updated DESC`
       : `project = ${project} ORDER BY updated DESC`;
     return { intent: 'EXTRACT_DATA', params: { project, jql, format: 'markdown' } };
   }
@@ -731,7 +738,12 @@ async function handleImplement(
   stream: any
 ): Promise<void> {
   const key = params.issueKey;
-  if (!key) { stream.markdown('Provide a Jira key (e.g., PROJ-123).'); return; }
+  if (!key) { stream.markdown('Provide a Jira key (e.g., EXES-123).'); return; }
+
+  if (!vscode.workspace.workspaceFolders?.length) {
+    stream.markdown('Open a **workspace folder** first (Implement writes files in the project).');
+    return;
+  }
 
   const wantPush = !!params.push;
   const wantPr = !!params.createPr;
@@ -744,7 +756,7 @@ async function handleImplement(
   ];
   if (wantPush) steps.push('Push to remote');
   if (wantPr) steps.push('Create Pull Request on GitHub');
-  if (!wantPush) steps.push('_Push skipped — type `@sg push ' + key + '` when ready_');
+  if (!wantPush) steps.push('_Push skipped — type `@SGUnifyAI push ' + key + '` when ready_');
 
   streamPlan(stream, steps);
 
@@ -767,17 +779,7 @@ async function handleImplement(
   const baseBranch = git.currentBranch();
   const branch = `feature/${issue.key}`;
 
-  try {
-    await git.createBranchAndCheckout(branch);
-  } catch {
-    // Branch may already exist — try checkout
-    try {
-      const repo = (git as any).repo;
-      await repo.checkout(branch);
-    } catch (e2: any) {
-      throw new Error(`Git: cannot create or checkout branch ${branch}: ${e2?.message}`);
-    }
-  }
+  await git.ensureBranchCheckedOut(branch);
 
   await git.stageAll();
   await git.commit(`${issue.key}: ${issue.summary}`.slice(0, 72));
@@ -787,7 +789,7 @@ async function handleImplement(
   if (wantPush) {
     await doPushAndPr(git, issue, baseBranch, wantPr, stream);
   } else {
-    stream.markdown(`Push skipped. When ready, type: \`@sg push ${issue.key}\`\n`);
+    stream.markdown(`Push skipped. When ready, type: \`@SGUnifyAI push ${issue.key}\`\n`);
   }
 }
 
@@ -849,7 +851,11 @@ async function generateEdits(issue: { key: string; summary: string; descriptionT
   if (!Array.isArray(parsed?.edits)) {
     throw new Error("LM response missing 'edits' array.");
   }
-  return parsed.edits as FileEdit[];
+  const edits = parsed.edits as FileEdit[];
+  if (!edits.length) {
+    throw new Error('LM returned no file edits. Rephrase the ticket or try again.');
+  }
+  return edits;
 }
 
 // ============================================================
@@ -883,7 +889,7 @@ async function handleAnalyzeProject(
 ): Promise<void> {
   const project = params.project;
   const days = params.days ?? 14;
-  if (!project) { stream.markdown('Provide a project key (e.g., EQC).'); return; }
+  if (!project) { stream.markdown('Provide a project key (e.g., EXES).'); return; }
 
   streamPlan(stream, [
     `Search all **${project}** issues updated in the last **${days}** days`,
@@ -949,20 +955,23 @@ function topCounts(items: string[], topN: number): Array<{ name: string; count: 
 
 function mermaidPie(title: string, rows: Array<{ name: string; count: number }>): string {
   const safeTitle = title.replace(/"/g, "'");
-  const lines = rows.map(r => `  "${r.name.replace(/"/g, "'")}" : ${r.count}`);
+  const data = rows.length ? rows : [{ name: '(no data)', count: 0 }];
+  const lines = data.map(r => `  "${r.name.replace(/"/g, "'")}" : ${r.count}`);
   return ['```mermaid', `pie title ${safeTitle}`, ...lines, '```', ''].join('\n');
 }
 
 function mermaidBar(title: string, rows: Array<{ name: string; count: number }>): string {
-  const labels = rows.map(r => r.name.replace(/\s+/g, ' ').trim());
-  const values = rows.map(r => r.count);
+  const data = rows.length ? rows : [{ name: '(no data)', count: 0 }];
+  const labels = data.map(r => r.name.replace(/\s+/g, ' ').trim());
+  const values = data.map(r => r.count);
   const safeTitle = title.replace(/"/g, "'");
+  const vmax = values.length ? Math.max(1, ...values) : 1;
   return [
     '```mermaid',
     'xychart-beta',
     `  title "${safeTitle}"`,
     '  x-axis [' + labels.map(l => `"${l.replace(/"/g, "'")}"`).join(', ') + ']',
-    '  y-axis "Count" 0 --> ' + Math.max(1, ...values),
+    '  y-axis "Count" 0 --> ' + vmax,
     '  bar [' + values.join(', ') + ']',
     '```',
     ''
@@ -1023,7 +1032,7 @@ async function handleAnalyzeDynamic(
     project = pendingLargeFetch.spec.project;
   }
   if (!project) {
-    stream.markdown('Provide a project key (e.g., EQC).');
+    stream.markdown('Provide a project key (e.g., EXES).');
     return;
   }
 
@@ -1063,7 +1072,8 @@ async function handleAnalyzeDynamic(
   }
 
   // Restore last large query when user only sends "confirm" (same JQL as pending).
-  if (confirm && pendingLargeFetch && !query) {
+  // Do not override when refining — user is composing a new filter on top of history.
+  if (confirm && pendingLargeFetch && !query && !refine) {
     spec = pendingLargeFetch.spec;
     reportSpec = pendingLargeFetch.reportSpec;
   }
@@ -1091,7 +1101,7 @@ async function handleAnalyzeDynamic(
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: 'SGA · Jira',
+        title: 'SGUnifyAI · Jira',
         cancellable: false
       },
       async progress => {
@@ -1102,16 +1112,16 @@ async function handleAnalyzeDynamic(
     stream.markdown(`**${total}** issue(s) matched.\n\n`);
     if (!total) return;
 
-    const LARGE_THRESHOLD = Math.max(0, Number(cfg().get<number>('analyze.largeThreshold', 2000)) || 2000);
+    const LARGE_THRESHOLD = DEFAULT_ANALYZE_LARGE_THRESHOLD;
     if (total > LARGE_THRESHOLD && !confirm) {
       pendingLargeFetch = { spec, reportSpec, total };
       stream.markdown(
         `This query matches **${total}** issues. Fetching them all may take time.\n\n` +
           `To continue, rerun with confirmation:\n` +
-          `- \`@sg analyze-dynamic confirm\`\n\n` +
+          `- \`@SGUnifyAI analyze-dynamic confirm\`\n\n` +
           `Or refine the scope:\n` +
-          `- \`@sg analyze-dynamic refine only last 14 days\`\n` +
-          `- \`@sg analyze-dynamic refine component = RustRunner\`\n`
+          `- \`@SGUnifyAI analyze-dynamic refine only last 14 days\`\n` +
+          `- \`@SGUnifyAI analyze-dynamic refine under epic EXES-100\`\n`
       );
       return;
     }
@@ -1119,7 +1129,7 @@ async function handleAnalyzeDynamic(
     const paged = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: 'SGA · Jira',
+        title: 'SGUnifyAI · Jira',
         cancellable: false
       },
       async progress => {
@@ -1132,6 +1142,13 @@ async function handleAnalyzeDynamic(
     stream.markdown(`Fetched **${issues.length}** issue(s).\n\n`);
   }
 
+  if (!issues.length) {
+    stream.markdown('_No issues to analyze in this scope._\n');
+    pendingLargeFetch = undefined;
+    return;
+  }
+  pendingLargeFetch = undefined;
+
   const velocity = computeVelocityFromIssues(issues);
 
   // Core distributions (always useful)
@@ -1139,8 +1156,8 @@ async function handleAnalyzeDynamic(
   const byStatus = topCounts(issues.map(i => i.status), Math.min(topN, 12));
   const byAssignee = topCounts(issues.map(i => i.assignee), topN);
   const byIssueType = topCounts(issues.map(i => i.issueType), Math.min(topN, 12));
-  const byComponent = topCounts(
-    issues.flatMap(i => (Array.isArray(i.components) && i.components.length ? i.components : ['(none)'])),
+  const byEpic = topCounts(
+    issues.map(i => (i.epicKey && String(i.epicKey).trim() ? String(i.epicKey).trim() : '(none)')),
     Math.min(topN, 12)
   );
 
@@ -1232,7 +1249,7 @@ async function handleAnalyzeDynamic(
       if (c === 'done_vs_notdone') stream.markdown(mermaidDoneVsNotDone(proj, done, notDoneCount));
       if (c === 'status_pie') stream.markdown(mermaidPie(`${proj} — Status distribution`, byStatus));
       if (c === 'assignee_bar') stream.markdown(mermaidBar(`${proj} — Top assignees`, byAssignee.slice(0, 10)));
-      if (c === 'component_bar') stream.markdown(mermaidBar(`${proj} — Top components`, byComponent.slice(0, 10)));
+      if (c === 'epic_bar') stream.markdown(mermaidBar(`${proj} — Top epics`, byEpic.slice(0, 10)));
       if (c === 'issuetype_bar') stream.markdown(mermaidBar(`${proj} — Issue types`, byIssueType.slice(0, 10)));
       if (c === 'aging_bar') stream.markdown(mermaidAgingHistogram(proj, agingBuckets));
     }
@@ -1240,11 +1257,11 @@ async function handleAnalyzeDynamic(
 
   if (reportSpec.sections.includes('raw')) {
     stream.markdown('### Détails (sample)\n\n');
-    stream.markdown(`| Key | Summary | Type | Status | Assignee | Components | SP | Updated |\n`);
-    stream.markdown(`|-----|---------|------|--------|----------|------------|----|---------|\n`);
+    stream.markdown(`| Key | Summary | Type | Status | Assignee | Epic | SP | Updated |\n`);
+    stream.markdown(`|-----|---------|------|--------|----------|------|----|---------|\n`);
     for (const i of issues.slice(0, 25)) {
-      const comps = (Array.isArray(i.components) ? i.components.join(', ') : '');
-      stream.markdown(`| ${i.key} | ${i.summary} | ${i.issueType} | ${i.status} | ${i.assignee} | ${comps} | ${i.storyPoints} | ${i.updated.slice(0, 10)} |\n`);
+      const epic = i.epicKey ? String(i.epicKey) : '';
+      stream.markdown(`| ${i.key} | ${i.summary} | ${i.issueType} | ${i.status} | ${i.assignee} | ${epic} | ${i.storyPoints} | ${i.updated.slice(0, 10)} |\n`);
     }
     stream.markdown('\n');
   }
@@ -1294,7 +1311,7 @@ async function handleAnalyzeDynamic(
     velocity,
     byStatus,
     byAssignee,
-    byComponent,
+    byEpic,
     byIssueType,
     risks: {
       staleCount: stale.length,
@@ -1372,7 +1389,9 @@ async function routeIntent(
     case 'EXTRACT_DATA':     return handleExtractData(classified.params, stream);
     case 'PUSH':             return handlePush(classified.params, stream);
     default:
-      stream.markdown(`Unknown intent: ${classified.intent}. Try: \`@sg explain PROJ-123\` or \`@sg analyze EQC 15 days\``);
+      stream.markdown(
+        `Unknown intent: ${classified.intent}. Try: \`@SGUnifyAI read PROJ-123\` or \`@SGUnifyAI analyze EXES 15 days\``
+      );
   }
 }
 
@@ -1383,35 +1402,45 @@ async function routeIntent(
 export function activate(context: vscode.ExtensionContext) {
   // Command palette shortcut (always IMPLEMENT)
   context.subscriptions.push(
-    vscode.commands.registerCommand('sg.implement', async () => {
+    vscode.commands.registerCommand('sgunifyai.implement', async () => {
       try {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders?.length) {
+          void vscode.window.showErrorMessage('SGUnifyAI: open a workspace folder first.');
+          return;
+        }
         const input = await vscode.window.showInputBox({
-          title: 'SGA',
-          prompt: 'Enter a Jira key (e.g., PROJ-123)',
-          validateInput: s => (JIRA_KEY_RE.test(s) ? undefined : 'Invalid Jira key')
+          title: 'SGUnifyAI',
+          prompt: 'Enter a Jira key (e.g., EXES-123)',
+          validateInput: s => (JIRA_KEY_RE.test(s.trim()) ? undefined : 'Invalid Jira key')
         });
         if (!input) return;
-        const key = input.match(JIRA_KEY_RE)?.[0];
+        const key = input.trim().match(JIRA_KEY_RE)?.[0];
         if (!key) throw new Error('Invalid Jira key.');
 
         await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `SGA: ${key}`, cancellable: false },
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `SGUnifyAI: ${key}`,
+            cancellable: false
+          },
           async () => {
-            // Minimal "implement + commit, no push"
             const jira = new JiraClient(cfg());
             const issue = await jira.getIssue(key);
             const edits = await generateEdits(issue);
             await applyFileEdits(edits);
             const git = new GitService();
             const branch = `feature/${key}`;
-            try { await git.createBranchAndCheckout(branch); } catch { /* exists */ }
+            await git.ensureBranchCheckedOut(branch);
             await git.stageAll();
             await git.commit(`${key}: ${issue.summary}`.slice(0, 72));
-            void vscode.window.showInformationMessage(`SGA: committed on ${branch}. Use @sg push ${key} to push + PR.`);
+            void vscode.window.showInformationMessage(
+              `SGUnifyAI: committed on ${branch}. Use @SGUnifyAI push ${key} to push + PR.`
+            );
           }
         );
       } catch (e: any) {
-        void vscode.window.showErrorMessage(`SGA: ${e?.message ?? String(e)}`);
+        void vscode.window.showErrorMessage(`SGUnifyAI: ${e?.message ?? String(e)}`);
       }
     })
   );
@@ -1420,20 +1449,20 @@ export function activate(context: vscode.ExtensionContext) {
   const chatApi = (vscode as any).chat;
   if (chatApi?.createChatParticipant) {
     const participant = chatApi.createChatParticipant(
-      'sg-agent',
+      'sgunifyai-agent',
       async (request: any, _ctx: any, stream: any, _token: any) => {
         try {
           const prompt = `${request?.command ?? ''} ${request?.prompt ?? ''}`.trim();
           if (!prompt) {
             stream.markdown(
-              'Hello! I\'m **@sg**, your Jira / Copilot / GitHub agent.\n\n' +
-              'Examples:\n' +
-              '- `@sg what is PROJ-123?`\n' +
-              '- `@sg implement PROJ-123`\n' +
-              '- `@sg create a Story on EQC to migrate the API`\n' +
-              '- `@sg analyze EQC last 15 days`\n' +
-              '- `@sg export EQC tickets as CSV`\n' +
-              '- `@sg push PROJ-123`\n'
+              'Hello! I\'m **@SGUnifyAI**, your Jira / Copilot / GitHub agent.\n\n' +
+                'Examples:\n' +
+                '- `@SGUnifyAI read PROJ-123`\n' +
+                '- `@SGUnifyAI implement EXES-123`\n' +
+                '- `@SGUnifyAI create a Story on EXES to migrate the API`\n' +
+                '- `@SGUnifyAI analyze EXES last 15 days`\n' +
+                '- `@SGUnifyAI export EXES tickets as CSV`\n' +
+                '- `@SGUnifyAI push PROJ-123`\n'
             );
             return;
           }
@@ -1452,10 +1481,8 @@ export function activate(context: vscode.ExtensionContext) {
             const key = prompt.match(JIRA_KEY_RE)?.[0] ?? '';
             classified = { intent: 'IMPLEMENT', params: { issueKey: key, push: false, createPr: false } };
           } else if (cmd === 'create' || cmd === 'analyze' || cmd === 'extract') {
-            // Let LM classify for full param extraction
             classified = await classifyIntent(prompt);
           } else if (cmd === 'analyze-dynamic') {
-            // Force dynamic analyze mode, let LM extract filters from the remaining prompt
             const p = prompt.replace(/^\s*analyze-dynamic\s+/i, '').trim();
             const confirm = /^\s*(confirm|ok|oui|go)\b/i.test(p);
             const withoutConfirm = p.replace(/^\s*(confirm|ok|oui|go)\b[:\s-]*/i, '').trim();
@@ -1467,9 +1494,25 @@ export function activate(context: vscode.ExtensionContext) {
             const q = confirm ? withoutConfirm : (cleaned || p);
             classified = { intent: 'ANALYZE_DYNAMIC', params: { project: proj, days, query: q, refine, confirm } };
           } else {
-            // NLU classification via LM
             stream.markdown('_Analyzing your request…_\n\n');
             classified = await classifyIntent(prompt);
+          }
+
+          if (classified.intent === 'IMPLEMENT') {
+            let k = String(classified.params.issueKey ?? '').trim();
+            if (!k || !JIRA_KEY_RE.test(k)) {
+              const picked = await vscode.window.showInputBox({
+                title: 'SGUnifyAI — Implement',
+                prompt: 'Jira issue key (e.g. EXES-123)',
+                validateInput: s => (JIRA_KEY_RE.test(s.trim()) ? undefined : 'Invalid Jira key')
+              });
+              k = picked?.trim().match(JIRA_KEY_RE)?.[0] ?? '';
+            }
+            if (!k) {
+              stream.markdown('**Implement** needs a Jira issue key (e.g. **EXES-123**).');
+              return;
+            }
+            classified.params.issueKey = k;
           }
 
           stream.markdown(`**Mode:** \`${classified.intent}\`\n\n`);

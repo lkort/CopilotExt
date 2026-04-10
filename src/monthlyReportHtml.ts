@@ -187,7 +187,7 @@ export function buildMonthlyJiraHtmlReport(opts: {
     </div>
   </div>
 
-  <div class="footer">Single-file HTML · Chart.js CDN · SGA extension</div>
+  <div class="footer">Single-file HTML · Chart.js CDN · SGUnifyAI</div>
 
   <script>
     const donut = ${donutData};

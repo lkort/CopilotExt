@@ -1,7 +1,7 @@
 {
-  "name": "sg",
-  "displayName": "SGA",
-  "description": "Multi-agent VS Code extension: Jira + Copilot + GitHub Enterprise.",
+  "name": "sgunifyai",
+  "displayName": "SGUnifyAI",
+  "description": "SGUnifyAI — Jira (Bearer), Copilot, GitHub Enterprise, Git.",
   "version": "0.1.0",
   "publisher": "sg",
   "private": true,
@@ -19,74 +19,49 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onCommand:sg.implement",
-    "onChatParticipant:sg-agent"
+    "onCommand:sgunifyai.implement",
+    "onChatParticipant:sgunifyai-agent"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "sg.implement",
-        "title": "SGA: Implement Jira ticket"
+        "command": "sgunifyai.implement",
+        "title": "SGUnifyAI: Implement Jira ticket"
       }
     ],
     "configuration": {
-      "title": "sg",
+      "title": "SGUnifyAI",
       "properties": {
-        "sg.jira.url": {
+        "sgunifyai.jira.url": {
           "type": "string",
           "default": "",
           "description": "Jira base URL (e.g. https://your-company.atlassian.net)"
         },
-        "sg.jira.token": {
+        "sgunifyai.jira.token": {
           "type": "string",
           "default": "",
           "format": "password",
-          "description": "Jira API token / PAT. Used as Bearer by default, or as the password part for Basic auth."
+          "description": "Jira API token or PAT. Sent as Authorization: Bearer <token>."
         },
-        "sg.jira.user": {
-          "type": "string",
-          "default": "",
-          "description": "Optional Jira username/email for Basic auth. If set and sg.jira.authType=auto, Basic auth is used."
-        },
-        "sg.jira.authType": {
-          "type": "string",
-          "default": "bearer",
-          "enum": [
-            "auto",
-            "bearer",
-            "basic"
-          ],
-          "description": "Jira auth scheme. auto = Basic when sg.jira.user is set (or token looks like user:token), otherwise Bearer."
-        },
-        "sg.github.url": {
+        "sgunifyai.github.url": {
           "type": "string",
           "default": "",
           "description": "GitHub Enterprise base URL (e.g. https://ghe.example.com). API = {url}/api/v3"
         },
-        "sg.github.token": {
+        "sgunifyai.github.token": {
           "type": "string",
           "default": "",
           "format": "password",
           "description": "GitHub Personal Access Token. Sent as token auth."
-        },
-        "sg.analyze.largeThreshold": {
-          "type": "number",
-          "default": 2000,
-          "description": "Threshold (issue count) above which analyze-dynamic asks for confirmation before fetching all matching issues."
-        },
-        "sg.jira.storyPointsFieldId": {
-          "type": "string",
-          "default": "",
-          "description": "Optional Jira custom field id for Story Points (e.g. customfield_10016). If set, it overrides automatic detection."
         }
       }
     },
     "chatParticipants": [
       {
-        "id": "sg-agent",
-        "name": "sg",
-        "description": "Intelligent Jira / Copilot / GitHub agent",
+        "id": "sgunifyai-agent",
+        "name": "SGUnifyAI",
+        "description": "Jira, Copilot, and GitHub agent",
         "commands": [
           {
             "name": "implement",

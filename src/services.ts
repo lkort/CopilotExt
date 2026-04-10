@@ -6,6 +6,9 @@ import * as vscode from 'vscode';
 
 const FETCH_TIMEOUT_MS = 60_000;
 
+/** Workspace configuration section (package.json contributes.configuration.properties prefix). */
+export const CONFIG_SECTION = 'sgunifyai';
+
 /** Read a VS Code setting; throw with a clear message if absent. */
 export function requireSetting(
   cfg: vscode.WorkspaceConfiguration,
@@ -13,7 +16,7 @@ export function requireSetting(
 ): string {
   const v = cfg.get<string>(key);
   if (!v || !String(v).trim()) {
-    throw new Error(`Missing setting: sg.${key}  — configure it in settings.json.`);
+    throw new Error(`Missing setting: ${CONFIG_SECTION}.${key}  — configure it in settings.json.`);
   }
   return String(v).trim();
 }
@@ -49,7 +52,7 @@ async function parseJsonResponse(res: Response, label: string): Promise<any> {
   if (text.trim().startsWith('<') || ct.includes('text/html')) {
     throw new Error(
       `${label}: received HTML instead of JSON (likely a login page). ` +
-        `Check sg.${label.toLowerCase()}.url and sg.${label.toLowerCase()}.token. Status ${res.status}.`
+        `Check ${CONFIG_SECTION}.${label.toLowerCase()}.url and ${CONFIG_SECTION}.${label.toLowerCase()}.token. Status ${res.status}.`
     );
   }
 
@@ -92,6 +95,8 @@ async function fetchWithRetry(
     const res = await fetchWithTimeout(url, init, label);
     last = res;
     if (res.status !== 429) return res;
+    // Drain body so the connection can be reused / released before waiting.
+    await res.text().catch(() => '');
     const ra = res.headers.get('retry-after');
     const sec = ra ? parseInt(ra, 10) : NaN;
     const delayMs = Number.isFinite(sec) && sec > 0 ? Math.min(sec * 1000, 60_000) : 1000 * (attempt + 1);
@@ -136,7 +141,8 @@ export type JiraIssue = {
   statusCategoryKey: string;
   storyPoints: number;
   issueType: string;
-  components: string[];
+  /** Epic key from parent or Epic Link field, empty if none */
+  epicKey: string;
   labels: string[];
   assignee: string;
   created: string;
@@ -157,14 +163,24 @@ export function isIssueDone(issue: Pick<JiraIssue, 'status' | 'statusCategoryKey
   return false;
 }
 
+/** Jira often returns custom fields as a bare number or as `{ value: number }`. */
+function jiraNumericField(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (v && typeof v === 'object' && v !== null && 'value' in v) {
+    const x = (v as { value?: unknown }).value;
+    if (typeof x === 'number' && Number.isFinite(x)) return x;
+  }
+  return undefined;
+}
+
 /** Try to extract story points from common custom-field names. */
 function extractStoryPoints(
   fields: Record<string, any>,
   explicitFieldId?: string
 ): number {
   if (explicitFieldId) {
-    const v = fields[explicitFieldId.trim()];
-    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    const n = jiraNumericField(fields[explicitFieldId.trim()]);
+    if (n !== undefined && n >= 0 && n <= 10000) return n;
   }
   const candidates = [
     fields.story_points,
@@ -175,17 +191,28 @@ function extractStoryPoints(
     fields.customfield_10106
   ];
   for (const v of candidates) {
-    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    const n = jiraNumericField(v);
+    if (n !== undefined && n >= 0) return n;
   }
   // Fallback: unknown customfield_* numeric (typical story point range)
   let best = 0;
   for (const [k, v] of Object.entries(fields)) {
     if (!k.startsWith('customfield_')) continue;
-    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-    if (v <= 0 || v > 200) continue;
-    best = Math.max(best, v);
+    const n = jiraNumericField(v);
+    if (n === undefined || n <= 0 || n > 200) continue;
+    best = Math.max(best, n);
   }
   return best;
+}
+
+/** Epic key: next-gen parent, or classic Epic Link field (Jira Cloud often customfield_10014). */
+function extractEpicKey(f: Record<string, any>): string {
+  const p = f.parent;
+  if (p && typeof p.key === 'string' && p.key.trim()) return p.key.trim();
+  const el = f.customfield_10014;
+  if (typeof el === 'string' && el.trim()) return el.trim();
+  if (el && typeof el.key === 'string' && el.key.trim()) return el.key.trim();
+  return '';
 }
 
 function mapIssue(raw: any, storyPointsFieldId?: string): JiraIssue {
@@ -198,7 +225,7 @@ function mapIssue(raw: any, storyPointsFieldId?: string): JiraIssue {
     statusCategoryKey: typeof f.status?.statusCategory?.key === 'string' ? f.status.statusCategory.key : '',
     storyPoints: extractStoryPoints(f, storyPointsFieldId),
     issueType: f.issuetype?.name ?? '',
-    components: Array.isArray(f.components) ? f.components.map((c: any) => c?.name).filter(Boolean) : [],
+    epicKey: extractEpicKey(f),
     labels: Array.isArray(f.labels) ? f.labels.filter((x: unknown) => typeof x === 'string') : [],
     assignee: f.assignee?.displayName ?? 'Unassigned',
     created: f.created ?? '',
@@ -218,40 +245,20 @@ export class JiraClient {
   private issueFieldsParam(): string {
     const base =
       'summary,description,status,assignee,created,updated,resolutiondate,' +
-      'labels,issuetype,components,story_points,customfield_10016,customfield_10028,customfield_10002';
+      'labels,issuetype,parent,customfield_10014,story_points,customfield_10016,customfield_10028,customfield_10002';
     const id = this.storyPointsFieldId();
     if (id && !base.includes(id)) return `${base},${id}`;
     return base;
   }
 
-  /**
-   * Determine and build auth header.
-   * - bearer: Authorization: Bearer <token>
-   * - basic:  Authorization: Basic <base64(user:token)>
-   * - auto: basic if sg.jira.user is set OR token looks like user:token, else bearer
-   */
+  /** Bearer token only (strip accidental "Bearer " prefix from settings). */
   private authHeader(): string {
-    const token = requireSetting(this.cfg, 'jira.token');
-    const user = optionalSetting(this.cfg, 'jira.user');
-    const authTypeRaw = (optionalSetting(this.cfg, 'jira.authType') ?? 'bearer').toLowerCase();
-
-    const tokenLooksLikeUserToken = token.includes(':') && !token.trim().startsWith('Bearer ');
-    const mode =
-      authTypeRaw === 'auto'
-        ? (user || tokenLooksLikeUserToken ? 'basic' : 'bearer')
-        : authTypeRaw;
-
-    if (mode === 'basic') {
-      const creds = user ? `${user}:${token}` : token;
-      const b64 = Buffer.from(creds, 'utf8').toString('base64');
-      return 'Basic ' + b64;
-    }
-
-    // default: bearer
+    let token = requireSetting(this.cfg, 'jira.token');
+    token = token.replace(/^\s*Bearer\s+/i, '').trim();
     return 'Bearer ' + token;
   }
 
-  /** Common headers: Basic/Bearer + JSON accept. */
+  /** Common headers: Bearer + JSON accept. */
   private headers(): Record<string, string> {
     return {
       'Authorization': this.authHeader(),
@@ -425,7 +432,7 @@ function parseGitHubRemoteUrl(remoteUrl: string): GitRemoteInfo {
 export class GitHubClient {
   constructor(private readonly cfg: vscode.WorkspaceConfiguration) {}
 
-  /** Build API base: always {sg.github.url}/api/v3. */
+  /** Build API base: always {sgunifyai.github.url}/api/v3. */
   private apiBase(): string {
     const ghUrl = requireSetting(this.cfg, 'github.url').replace(/\/+$/, '');
     if (/\/api\/v3$/i.test(ghUrl)) return ghUrl;
@@ -528,6 +535,20 @@ export class GitService {
   async push(branch: string): Promise<void> {
     await this.repo.push('origin', branch, true);
   }
+
+  /** Create branch and check it out, or checkout if it already exists. */
+  async ensureBranchCheckedOut(branch: string): Promise<void> {
+    try {
+      await this.repo.createBranch(branch, true);
+    } catch {
+      try {
+        await this.repo.checkout(branch);
+      } catch (e2: unknown) {
+        const msg = e2 instanceof Error ? e2.message : String(e2);
+        throw new Error(`Git: cannot create or checkout branch ${branch}: ${msg}`);
+      }
+    }
+  }
 }
 
 // ============================================================
@@ -539,6 +560,24 @@ export type FileEdit = {
   content: string; // full file content (rewrite)
 };
 
+function assertSafeRelativeWorkspacePath(raw: string): string {
+  const rel = String(raw ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '');
+  if (!rel) throw new Error('Edit path is empty.');
+  const segments = rel.split('/').filter(Boolean);
+  if (segments.some(s => s === '..')) {
+    throw new Error(`Invalid edit path (no ".."): ${raw}`);
+  }
+  if (/^(?:[a-zA-Z]:)?\//.test(rel) || rel.startsWith('//')) {
+    throw new Error(
+      `Edit path must be relative to the workspace root, not absolute: ${raw}`
+    );
+  }
+  return segments.join('/');
+}
+
 export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders?.length) throw new Error('No workspace folder is open.');
@@ -546,7 +585,8 @@ export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
 
   const wsEdit = new vscode.WorkspaceEdit();
   for (const e of edits) {
-    const uri = vscode.Uri.joinPath(root, e.path);
+    const safePath = assertSafeRelativeWorkspacePath(e.path);
+    const uri = vscode.Uri.joinPath(root, ...safePath.split('/'));
     try {
       await vscode.workspace.fs.stat(uri);
       const doc = await vscode.workspace.openTextDocument(uri);
