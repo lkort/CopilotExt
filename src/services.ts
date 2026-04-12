@@ -128,6 +128,26 @@ function normalizeJiraDescription(description: unknown): string {
   return parts.join('').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/** Minimal ADF document for Jira REST API v3 `description` field. */
+function jiraPlainTextToAdf(plain: string): Record<string, unknown> {
+  const text = String(plain ?? '')
+    .replace(/\r\n/g, '\n')
+    .slice(0, 32000);
+  if (!text.trim()) {
+    return { type: 'doc', version: 1, content: [] };
+  }
+  return {
+    type: 'doc',
+    version: 1,
+    content: [
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text }]
+      }
+    ]
+  };
+}
+
 // ============================================================
 // Jira Client — Bearer auth, Accept: application/json
 // ============================================================
@@ -328,28 +348,67 @@ export class JiraClient {
   }
 
   // ---- CREATE -------------------------------------------------
+  /**
+   * Jira Cloud REST v3 requires `description` as Atlassian Document Format (ADF).
+   * v2 accepts a plain string. We try v3 + ADF first, then v2 + string.
+   */
   async createIssue(params: {
     project: string;
     summary: string;
     description: string;
     issueType: string;
   }): Promise<{ key: string }> {
-    const res = await this.requestJira(`/issue`, {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify({
-        fields: {
-          project: { key: params.project.toUpperCase() },
-          summary: params.summary,
-          description: params.description,
-          issuetype: { name: params.issueType || 'Story' }
-        }
-      })
-    });
+    const projectKey = String(params.project ?? '')
+      .trim()
+      .toUpperCase();
+    const summary = String(params.summary ?? '')
+      .trim()
+      .slice(0, 255);
+    const description = String(params.description ?? '');
+    const issueType = String(params.issueType ?? 'Story').trim() || 'Story';
+
+    if (!projectKey || !summary) {
+      throw new Error('Jira: CREATE requires a non-empty project key and summary.');
+    }
+
+    const fieldsBase = {
+      project: { key: projectKey },
+      summary,
+      issuetype: { name: issueType }
+    };
+
+    const bodyV3 = {
+      fields: {
+        ...fieldsBase,
+        description: jiraPlainTextToAdf(description)
+      }
+    };
+
+    const fieldsV2: Record<string, unknown> = { ...fieldsBase };
+    if (description.trim()) {
+      fieldsV2.description = description;
+    }
+
+    const bodyV2 = { fields: fieldsV2 };
+
+    const postVersion = async (ver: string, body: object): Promise<Response> => {
+      const url = `${this.base()}/rest/api/${ver}/issue`;
+      return fetchWithRetry(
+        url,
+        { method: 'POST', headers: this.headers(), body: JSON.stringify(body) },
+        'Jira'
+      );
+    };
+
+    let res = await postVersion('3', bodyV3);
+    if (!res.ok) {
+      await res.text().catch(() => '');
+      res = await postVersion('2', bodyV2);
+    }
 
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Jira: CREATE issue failed (${res.status}) ${body.slice(0, 800)}`);
+      const err = await res.text().catch(() => '');
+      throw new Error(`Jira: CREATE issue failed (${res.status}) ${err.slice(0, 800)}`);
     }
 
     const json = await parseJsonResponse(res, 'Jira');
@@ -529,7 +588,17 @@ export class GitService {
   }
 
   async commit(message: string): Promise<void> {
-    await this.repo.commit(message);
+    try {
+      await this.repo.commit(message);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/nothing to commit|no changes|working tree clean/i.test(msg)) {
+        throw new Error(
+          'Git: nothing to commit after edits. The model may have used invalid paths or empty files — check workspace-relative paths in the JSON output.'
+        );
+      }
+      throw e;
+    }
   }
 
   async push(branch: string): Promise<void> {
@@ -578,6 +647,22 @@ function assertSafeRelativeWorkspacePath(raw: string): string {
   return segments.join('/');
 }
 
+export function normalizeFileEdits(raw: unknown): FileEdit[] {
+  if (!Array.isArray(raw)) return [];
+  const out: FileEdit[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const path = typeof o.path === 'string' ? o.path : String(o.path ?? '').trim();
+    let content = o.content;
+    if (typeof content !== 'string') {
+      content = content == null ? '' : String(content);
+    }
+    if (path) out.push({ path, content: content as string });
+  }
+  return out;
+}
+
 export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders?.length) throw new Error('No workspace folder is open.');
@@ -587,14 +672,15 @@ export async function applyFileEdits(edits: FileEdit[]): Promise<void> {
   for (const e of edits) {
     const safePath = assertSafeRelativeWorkspacePath(e.path);
     const uri = vscode.Uri.joinPath(root, ...safePath.split('/'));
+    const content = typeof e.content === 'string' ? e.content : String(e.content ?? '');
     try {
       await vscode.workspace.fs.stat(uri);
       const doc = await vscode.workspace.openTextDocument(uri);
       const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
-      wsEdit.replace(uri, fullRange, e.content);
+      wsEdit.replace(uri, fullRange, content);
     } catch {
       wsEdit.createFile(uri, { overwrite: true });
-      wsEdit.insert(uri, new vscode.Position(0, 0), e.content);
+      wsEdit.insert(uri, new vscode.Position(0, 0), content);
     }
   }
 

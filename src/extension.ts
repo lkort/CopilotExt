@@ -7,6 +7,7 @@ import {
   GitService,
   isIssueDone,
   JiraClient,
+  normalizeFileEdits,
   ProjectMetrics
 } from './services';
 import { buildMonthlyJiraHtmlReport } from './monthlyReportHtml';
@@ -105,17 +106,26 @@ async function askLm(system: string, user: string): Promise<string> {
   const messages = [userMessage(user)];
   const cancellation = new (vscode as any).CancellationTokenSource();
 
-  let resp: any;
   try {
-    // Preferred: pass system prompt via options (1.93+)
-    resp = await model.sendRequest(messages, { systemPrompt: system }, cancellation.token);
-  } catch {
-    // Fallback: embed system prompt into the user message
-    const combined = system + '\n\n---\n\nUser message:\n' + user;
-    resp = await model.sendRequest([userMessage(combined)], {}, cancellation.token);
+    let resp: any;
+    try {
+      resp = await model.sendRequest(messages, { systemPrompt: system }, cancellation.token);
+    } catch {
+      const combined = system + '\n\n---\n\nUser message:\n' + user;
+      resp = await model.sendRequest([userMessage(combined)], {}, cancellation.token);
+    }
+    return await collectText(resp);
+  } finally {
+    cancellation.dispose?.();
   }
+}
 
-  return await collectText(resp);
+/** Strip first ``` / ```json fenced block so brace-based JSON extraction works. */
+function stripMarkdownJsonFence(raw: string): string {
+  const s = raw.trim();
+  const m = s.match(/```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```/i);
+  if (m) return m[1].trim();
+  return s;
 }
 
 /** Ask the LM and parse the first JSON object found in its response. */
@@ -124,13 +134,14 @@ async function askLmJson(system: string, user: string): Promise<any> {
   if (!raw || !raw.trim()) {
     throw new Error('LM returned an empty response.');
   }
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start < 0 || end < 0) {
+  const cleaned = stripMarkdownJsonFence(raw);
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end < 0 || end <= start) {
     throw new Error(`LM did not return valid JSON. Raw response:\n${raw.slice(0, 500)}`);
   }
   try {
-    return JSON.parse(raw.slice(start, end + 1));
+    return JSON.parse(cleaned.slice(start, end + 1));
   } catch (e: any) {
     throw new Error(`LM returned malformed JSON: ${e?.message}. Raw:\n${raw.slice(0, 500)}`);
   }
@@ -704,15 +715,18 @@ async function handleCreateIssue(
   params: Record<string, any>,
   stream: any
 ): Promise<void> {
-  const project = params.project;
-  const summary = params.summary;
+  const project = String(params.project ?? '').trim();
+  const summary = String(params.summary ?? '').trim();
+  const description = String(params.description ?? '').trim();
+  const issueType = String(params.issueType ?? 'Story').trim() || 'Story';
+
   if (!project || !summary) {
     stream.markdown('I need at least a **project key** and a **summary** to create a ticket.');
     return;
   }
 
   streamPlan(stream, [
-    `Create a **${params.issueType || 'Story'}** on project **${project}**`,
+    `Create a **${issueType}** on project **${project}**`,
     `Title: "${summary}"`
   ]);
 
@@ -720,8 +734,8 @@ async function handleCreateIssue(
   const result = await jira.createIssue({
     project,
     summary,
-    description: params.description || '',
-    issueType: params.issueType || 'Story'
+    description,
+    issueType
   });
 
   const jiraUrl = cfg().get<string>('jira.url')?.replace(/\/+$/, '');
@@ -760,26 +774,23 @@ async function handleImplement(
 
   streamPlan(stream, steps);
 
-  // 1 — Fetch ticket
   const jira = new JiraClient(cfg());
   stream.markdown(`Fetching **${key}**…\n\n`);
   const issue = await jira.getIssue(key);
 
-  // 2 — Generate edits via LM
-  stream.markdown('Generating code changes…\n\n');
-  const edits = await generateEdits(issue);
-  stream.markdown(`Generated **${edits.length}** file edit(s).\n\n`);
-
-  // 3 — Apply
-  await applyFileEdits(edits);
-  stream.markdown('Edits applied to workspace.\n\n');
-
-  // 4 — Git: branch + commit
   const git = new GitService();
   const baseBranch = git.currentBranch();
   const branch = `feature/${issue.key}`;
 
+  stream.markdown(`Checking out \`${branch}\`…\n\n`);
   await git.ensureBranchCheckedOut(branch);
+
+  stream.markdown('Generating code changes…\n\n');
+  const edits = await generateEdits(issue);
+  stream.markdown(`Generated **${edits.length}** file edit(s).\n\n`);
+
+  await applyFileEdits(edits);
+  stream.markdown('Edits applied to workspace.\n\n');
 
   await git.stageAll();
   await git.commit(`${issue.key}: ${issue.summary}`.slice(0, 72));
@@ -839,21 +850,26 @@ async function generateEdits(issue: { key: string; summary: string; descriptionT
     '- Never include secrets/tokens.'
   ].join('\n');
 
+  const descMax = 12_000;
+  const desc =
+    (issue.descriptionText || '').length > descMax
+      ? `${(issue.descriptionText || '').slice(0, descMax)}\n\n[… description truncated …]`
+      : issue.descriptionText || '(empty)';
+
   const user = [
     `Ticket: ${issue.key}`,
     `Summary: ${issue.summary}`,
-    `Description:\n${issue.descriptionText || '(empty)'}`,
+    `Description:\n${desc}`,
     '',
     'Return the JSON now.'
   ].join('\n');
 
   const parsed = await askLmJson(system, user);
-  if (!Array.isArray(parsed?.edits)) {
-    throw new Error("LM response missing 'edits' array.");
-  }
-  const edits = parsed.edits as FileEdit[];
+  const edits = normalizeFileEdits(parsed?.edits);
   if (!edits.length) {
-    throw new Error('LM returned no file edits. Rephrase the ticket or try again.');
+    throw new Error(
+      "LM response missing a non-empty 'edits' array with { path, content }. Check JSON output or try again."
+    );
   }
   return edits;
 }
@@ -1427,11 +1443,11 @@ export function activate(context: vscode.ExtensionContext) {
           async () => {
             const jira = new JiraClient(cfg());
             const issue = await jira.getIssue(key);
-            const edits = await generateEdits(issue);
-            await applyFileEdits(edits);
             const git = new GitService();
             const branch = `feature/${key}`;
             await git.ensureBranchCheckedOut(branch);
+            const edits = await generateEdits(issue);
+            await applyFileEdits(edits);
             await git.stageAll();
             await git.commit(`${key}: ${issue.summary}`.slice(0, 72));
             void vscode.window.showInformationMessage(
